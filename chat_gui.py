@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2258,6 +2258,7 @@ class ChatApp:
         self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms}
         self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
+        self._last_list_fp = None          # 会话列表指纹（无实质变化时跳过重建，减卡顿）
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
@@ -2706,6 +2707,7 @@ class ChatApp:
         self._images = []
         self._thumb_cache = {}
         self._my_avatar_ctk = None
+        self._last_list_fp = None
         self.root.configure(fg_color=C("app_bg"))
         self._build_ui()
         self._build_menu()
@@ -3081,11 +3083,13 @@ class ChatApp:
             if c["cid"] == cid:
                 self._contacts.remove(c)
                 _save_contacts(self._contacts)
+                self._last_list_fp = None
                 self._apply_session_list()
                 self._set_status("已取消收藏", "ok")
                 return
         self._contacts.append({"cid": cid, "name": name})
         _save_contacts(self._contacts)
+        self._last_list_fp = None
         self._apply_session_list()
         self._set_status("已收藏联系人", "ok")
 
@@ -3156,7 +3160,23 @@ class ChatApp:
 
     # --------------------------- 左侧会话/成员列表 ---------------------------
 
+    def _list_fingerprint(self):
+        """会话列表关键状态指纹：无变化时跳过重建。"""
+        try:
+            fp = [self._current, (self.search_var.get() or ""), len(self._rooms),
+                  len(self._sessions), len(self._peers),
+                  tuple(sorted((k, s.get("unread", 0), bool(s.get("online")), bool(s.get("@me")),
+                                ((s.get("messages") or [None])[-1].get("mid") if s.get("messages") else None))
+                               for k, s in self._sessions.items()))]
+            return tuple(fp)
+        except Exception:
+            return None
+
     def _apply_session_list(self):
+        fp = self._list_fingerprint()
+        if fp is not None and fp == self._last_list_fp:
+            return  # 无实质变化，跳过重建
+        self._last_list_fp = fp
         for w in self.session_frame.winfo_children():
             w.destroy()
         kw = (self.search_var.get() or "").strip().lower()
@@ -4659,6 +4679,7 @@ class ChatApp:
             self._pinned_sessions.add(key)
             self._set_status("已置顶该会话", "ok")
         _update_settings("pinned_sessions", sorted(self._pinned_sessions))
+        self._last_list_fp = None
         self._apply_session_list()
 
     def _toggle_mute(self, key):
@@ -4669,6 +4690,7 @@ class ChatApp:
             self._muted.add(key)
             self._set_status("已静音该会话", "ok")
         _update_settings("muted_sessions", sorted(self._muted))
+        self._last_list_fp = None
         self._apply_session_list()
 
     def _restore_status(self):

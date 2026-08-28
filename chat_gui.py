@@ -91,13 +91,13 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.4.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
 DEFAULT_BROKER = "broker.emqx.io"
 DEFAULT_PORT = 1883
-CHUNK_SIZE = 256 * 1024          # 每个分片 256KB（二进制直传，无 base64 开销）
+CHUNK_SIZE = 512 * 1024          # 每个分片 512KB（二进制直传，更大分片减少往返次数，提速）
 MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
@@ -843,7 +843,7 @@ class MqttBackend:
         c.on_disconnect = self._on_disconnect
         c.reconnect_delay_set(1, 30)
         try:
-            c.max_inflight_messages_set(128)
+            c.max_inflight_messages_set(256)
         except Exception:
             pass
         try:
@@ -1683,6 +1683,9 @@ class ChatApp:
         self._members_visible = False  # 成员列表面板是否展开
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._dnd = False              # 免打扰（静音通知+提示音）
+        self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
+        self._reaction_rows = {}       # mid -> 回应 badge 行控件
+        self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1690,6 +1693,11 @@ class ChatApp:
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
         self.notify_popup = bool(_load_settings().get("notify_popup", True))
         self.encrypt_pass = str(_load_settings().get("encrypt_pass", "") or "")
+        self.broker = str(_load_settings().get("broker", "") or "").strip() or DEFAULT_BROKER
+        try:
+            self.port = int(_load_settings().get("port", DEFAULT_PORT))
+        except Exception:
+            self.port = DEFAULT_PORT
 
         self.root.title("P2P 聊天")
         saved_geo = str(_load_settings().get("window_geometry", "") or "").strip()
@@ -1967,12 +1975,25 @@ class ChatApp:
         except Exception:
             pass
 
+    def _apply_broker_setting(self, broker_var, port_var):
+        """应用自定义服务器设置（自建局域网 broker 可大幅提速）。"""
+        b = broker_var.get().strip()
+        if b:
+            self.broker = b
+        try:
+            self.port = int(port_var.get().strip())
+        except Exception:
+            self.port = DEFAULT_PORT
+        _update_settings("broker", self.broker)
+        _update_settings("port", self.port)
+        self._set_status(f"服务器已设为 {self.broker}:{self.port}（重新连接后生效）", "ok")
+
     def _open_settings(self):
         """设置中心对话框：集中管理所有开关与选项。"""
         try:
             win = ctk.CTkToplevel(self.root)
             win.title("设置")
-            win.geometry("430x400")
+            win.geometry("430x520")
             win.resizable(False, False)
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="设置中心", font=(FONT, 15, "bold"),
@@ -1994,6 +2015,21 @@ class ChatApp:
             ctk.CTkCheckBox(win, text="免打扰（静音通知+提示音）", variable=dnd_var,
                             command=lambda: self._apply_setting_dnd(dnd_var),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+
+            ctk.CTkLabel(win, text="服务器（同一局域网可自建 broker 提速）",
+                         font=(FONT, 10), text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(10, 0))
+            broker_var = ctk.StringVar(value=self.broker)
+            ctk.CTkEntry(win, textvariable=broker_var, width=240, height=30, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         placeholder_text="服务器地址（如 192.168.1.10）", font=(FONT, 11)).pack(pady=4)
+            port_var = ctk.StringVar(value=str(self.port))
+            ctk.CTkEntry(win, textvariable=port_var, width=120, height=30, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         placeholder_text="端口", font=(FONT, 11)).pack(pady=2)
+            ctk.CTkButton(win, text="应用服务器设置", width=140, height=28, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
+                          font=(FONT, 11),
+                          command=lambda: self._apply_broker_setting(broker_var, port_var)).pack(pady=4)
 
             ctk.CTkButton(win, text="端到端加密口令…", height=32, corner_radius=8,
                           fg_color=C("input_bg"), text_color=C("text"), hover_color=C("input_hover"),
@@ -3057,7 +3093,7 @@ class ChatApp:
             s["messages"] = _load_group_history(room, self.FEED_MAX)
 
         self.backend = MqttBackend(
-            name, self.cid, DEFAULT_BROKER, DEFAULT_PORT,
+            name, self.cid, self.broker, self.port,
             on_text=self._cb_text,
             on_peers=self._cb_peers,
             on_file=self._cb_file,
@@ -3406,6 +3442,33 @@ class ChatApp:
         self._append_message(s["key"], name, text, False, mid=mid, reply=reply)
         self._schedule_session_list()
 
+    def _refresh_reaction_badge(self, mid):
+        """局部刷新某条消息的回应 badge，避免整页重渲染（性能优化）。"""
+        bubble = self._bubble_frames.get(mid)
+        old_row = self._reaction_rows.pop(mid, None)
+        if old_row is not None:
+            try:
+                old_row.destroy()
+            except Exception:
+                pass
+        if bubble is None:
+            self._render_feed()  # 兜底：气泡不在缓存里（如刚展开历史），整页刷新
+            return
+        s = self._sessions.get(self._current)
+        m = None
+        if s:
+            m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+        if m and m.get("reactions"):
+            row = ctk.CTkFrame(bubble, fg_color="transparent")
+            row.pack(anchor="e", padx=12, pady=(0, 4))
+            for emo, bucket in m["reactions"].items():
+                n = len(bucket) if isinstance(bucket, dict) else int(bucket)
+                if n <= 0:
+                    continue
+                ctk.CTkLabel(row, text=f"{emo} {n}", text_color=C("text_mute"),
+                             font=(FONT, 9)).pack(side="left", padx=2)
+            self._reaction_rows[mid] = row
+
     def _receive_reaction(self, room, mid, emoji, cid, name):
         """收到表情回应：切换该表情下某人的回应（再次发送=取消）。"""
         if not mid or not emoji or cid == self.cid:
@@ -3429,7 +3492,7 @@ class ChatApp:
                     bucket[cid] = name or "匿名"
                 self._save_session(s)
                 if key == self._current:
-                    self._render_feed()
+                    self._refresh_reaction_badge(mid)
                 return
 
     def _do_reaction(self, mid, emoji):
@@ -3456,7 +3519,7 @@ class ChatApp:
             bucket[self.cid] = my_name
         self._save_session(s)
         self.backend.send_reaction(target, mid, emoji, is_dm)
-        self._render_feed()
+        self._refresh_reaction_badge(mid)
 
     def _receive_edit(self, room, mid, who, text):
         """收到编辑指令：更新对应消息的正文并标记“已编辑”。"""
@@ -3475,7 +3538,7 @@ class ChatApp:
                 m["edited"] = True
                 self._save_session(s)
                 if key == self._current:
-                    self._render_feed()
+                    self._schedule_feed_refresh()
                 return
 
     def _do_edit(self, mid, new_text):
@@ -3522,7 +3585,7 @@ class ChatApp:
                     names.append(name)
                 self._save_session(s)
                 if key == self._current:
-                    self._render_feed()
+                    self._schedule_feed_refresh()
                 return
 
     def _receive_read(self, room, mid, cid, name):
@@ -3543,7 +3606,7 @@ class ChatApp:
                     names.append(name)
                 self._save_session(s)
                 if key == self._current:
-                    self._render_feed()
+                    self._schedule_feed_refresh()
                 return
 
     def _receive_recall(self, room, mid, who):
@@ -3565,7 +3628,7 @@ class ChatApp:
                 m["recalled_by"] = who or "对方"
                 self._save_session(s)
                 if key == self._current:
-                    self._render_feed()
+                    self._schedule_feed_refresh()
                 return
 
     def _do_recall(self, mid):
@@ -3875,6 +3938,8 @@ class ChatApp:
             return
         tstr = _fmt_time(ts) if ts else ""
         bubble = self._message_row(name, mine, show_head, highlight=self._mentions_me(text))
+        if mid:
+            self._bubble_frames[mid] = bubble
         if reply:
             rname = str(reply.get("name", ""))[:20]
             rtext = str(reply.get("text", "")).replace("\n", " ")[:40]
@@ -3927,6 +3992,8 @@ class ChatApp:
                     continue
                 ctk.CTkLabel(row, text=f"{emo} {n}", text_color=C("text_mute"),
                              font=(FONT, 9)).pack(side="left", padx=2)
+            if mid:
+                self._reaction_rows[mid] = row
         self._maybe_scroll_bottom()
         self._trim_feed()
 
@@ -4151,10 +4218,25 @@ class ChatApp:
         self._history_expanded = True
         self._render_feed()
 
+    def _schedule_feed_refresh(self):
+        """合并短时间内的多次回执（已读/送达/编辑/撤回），只重渲染一次。"""
+        if self._feed_after is not None:
+            try:
+                self.root.after_cancel(self._feed_after)
+            except Exception:
+                pass
+        self._feed_after = self.root.after(80, self._do_feed_refresh)
+
+    def _do_feed_refresh(self):
+        self._feed_after = None
+        self._render_feed()
+
     def _render_feed(self):
         for w in self.feed.winfo_children():
             w.destroy()
         self._images = []
+        self._bubble_frames = {}
+        self._reaction_rows = {}
         s = self._sessions.get(self._current)
         if s is None:
             self._update_chat_title()

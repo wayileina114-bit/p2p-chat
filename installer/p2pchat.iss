@@ -3,7 +3,7 @@
 ; 安装时自动检测已装版本，并询问是否先卸载旧版本
 
 #define MyAppName "P2P聊天"
-#define MyAppVersion "2.3.9"
+#define MyAppVersion "2.4.0"
 #define MyAppPublisher "P2PChat"
 #define MyAppExeName "P2PChat.exe"
 

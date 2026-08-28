@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.10"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.11"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -824,21 +824,39 @@ class MqttBackend:
             return
         if idx >= r["total"]:
             return
-        if idx in r["chunks"]:
+        if idx in r["received"]:
             return
-        r["chunks"][idx] = raw[17:]
+        try:
+            r["fh"].seek(idx * CHUNK_SIZE)
+            r["fh"].write(raw[17:])
+        except Exception:
+            return
+        r["received"].add(idx)
         r["got"] += 1
         if r["got"] >= r["total"]:
             self._finish(tid)
 
+    @staticmethod
+    def _cleanup_part(tmp):
+        try:
+            if tmp and os.path.isfile(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
+
     def _finish(self, tid):
         r = self._receivers.pop(tid)
         try:
-            blob = b"".join(r["chunks"][i] for i in range(r["total"]))
-        except (KeyError, IndexError):
+            r["fh"].close()
+        except Exception:
+            pass
+        tmp = r.get("tmp")
+        if r["got"] < r["total"]:
+            self._cleanup_part(tmp)
             self._fire_file(r["room"], "error", {"name": r["name"], "msg": "分片缺失，接收失败"})
             return
-        if len(blob) != r["size"] or hashlib.md5(blob).hexdigest() != r["md5"]:
+        if os.path.getsize(tmp) != r["size"] or _md5_file(tmp) != r["md5"]:
+            self._cleanup_part(tmp)
             self._fire_file(r["room"], "error", {"name": r["name"], "msg": "校验失败，文件可能损坏"})
             return
         d = DOWNLOADS_DIR
@@ -849,20 +867,29 @@ class MqttBackend:
         while os.path.exists(path):
             path = f"{base}({k}){ext}"
             k += 1
-        with open(path, "wb") as f:
-            f.write(blob)
+        try:
+            os.replace(tmp, path)
+        except Exception:
+            self._cleanup_part(tmp)
+            self._fire_file(r["room"], "error", {"name": r["name"], "msg": "保存文件失败"})
+            return
         self._fire_file(r["room"], "done", {
             "name": r["name"], "path": path, "size": r["size"],
             "mime": r["mime"], "sname": r.get("sname", "对方"),
         })
 
     def _watch_recv(self, tid):
-        """接收方看门狗：超过 RECV_TIMEOUT 仍未收齐数据则清理残留，避免内存泄漏。"""
+        """接收方看门狗：超过 RECV_TIMEOUT 仍未收齐数据则清理残留，避免内存/磁盘泄漏。"""
         time.sleep(RECV_TIMEOUT)
         r = self._receivers.get(tid)
         if r is None:
             return
         self._receivers.pop(tid, None)
+        try:
+            r["fh"].close()
+        except Exception:
+            pass
+        self._cleanup_part(r.get("tmp"))
         self._fire_file(r["room"], "error", {"name": r["name"], "msg": "接收超时，传输中断"})
 
     # --------------------------- 对外方法 ---------------------------
@@ -887,6 +914,12 @@ class MqttBackend:
             p["evt"].set()
         self._pending.clear()
         self._offers.clear()
+        for r in self._receivers.values():
+            try:
+                r["fh"].close()
+            except Exception:
+                pass
+            self._cleanup_part(r.get("tmp"))
         self._receivers.clear()
         self.presence.clear()
         client = self._client
@@ -998,6 +1031,9 @@ class MqttBackend:
         if not os.path.isfile(path):
             return False
         size = os.path.getsize(path)
+        if size <= 0:
+            self._fire_file(room, "error", {"name": os.path.basename(path), "msg": "文件为空，无法发送"})
+            return False
         if size > MAX_FILE:
             self._fire_file(room, "error", {"name": os.path.basename(path), "msg": "超过 200MB 上限"})
             return False
@@ -1024,10 +1060,19 @@ class MqttBackend:
         if data is None:
             return
         room = data.get("room")
+        d = DOWNLOADS_DIR
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, ".p2pchat-part-" + tid)
+        try:
+            fh = open(tmp, "wb")
+        except Exception:
+            self._fire_file(room, "error", {"name": data["name"], "msg": "无法创建接收文件"})
+            return
         self._receivers[tid] = {
             "name": data["name"], "size": data["size"], "mime": data["mime"],
             "total": data["total"], "md5": data["md5"],
-            "chunks": {}, "got": 0, "sname": data.get("sname", "对方"), "room": room,
+            "received": set(), "got": 0, "fh": fh, "tmp": tmp,
+            "sname": data.get("sname", "对方"), "room": room,
         }
         threading.Thread(target=self._watch_recv, args=(tid,), daemon=True).start()
         self._publish_ctrl(room, {"kind": "accept", "id": tid, "from": self.cid, "to": data["from"]})

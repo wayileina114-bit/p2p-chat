@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2631,6 +2631,12 @@ class ChatApp:
         self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
         self._last_list_fp = None          # 会话列表指纹（无实质变化时跳过重建，减卡顿）
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
+        self._playing_voice = None    # 当前播放中的语音文件路径
+        self._voice_start_ts = 0.0    # 当前播放开始时间戳
+        self._voice_btns = {}         # 语音路径 -> 播放按钮（播放时更新文本）
+        self._voice_bars = {}         # 语音路径 -> 进度条
+        self._voice_durs = {}         # 语音路径 -> 时长（秒）
+        self._voice_tick_job = None   # 进度刷新的 after 任务 id
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
         self._body_labels = {}         # mid -> 正文 label（局部更新编辑）
@@ -3423,6 +3429,12 @@ class ChatApp:
     def _switch_to(self, key):
         if key is None or key not in self._sessions:
             return
+        # 切换会话时停止语音播放，避免进度条残留
+        try:
+            if getattr(self, "_playing_voice", None):
+                self._stop_voice_play(self._playing_voice)
+        except Exception:
+            pass
         # 记录离开旧会话的时间，用于回来后画“新消息”分隔线
         old = self._sessions.get(self._current)
         if old is not None and old.get("key") != key:
@@ -4540,17 +4552,77 @@ class ChatApp:
                 self._do_send_file(path)
 
     def _toggle_voice_play(self, path):
-        """点击语音气泡：播放；再点停止。"""
+        """点击语音气泡：播放（显示进度条）；再点停止。"""
         if getattr(self, "_playing_voice", None) == path:
-            try:
-                import winsound
-                winsound.PlaySound(None, winsound.SND_PURGE)
-            except Exception:
-                pass
-            self._playing_voice = None
+            self._stop_voice_play(path)
             return
         self._playing_voice = path
+        bar = self._voice_bars.get(path)
+        if bar is not None:
+            try:
+                bar.set(0)
+                bar.pack(anchor="w", pady=(4, 0))
+            except Exception:
+                pass
+        btn = self._voice_btns.get(path)
+        if btn is not None:
+            try:
+                btn.configure(text="⏹ 停止")
+            except Exception:
+                pass
         _play_voice(path)
+        self._voice_start_ts = time.time()
+        self._voice_tick()
+
+    def _stop_voice_play(self, path, done=False):
+        """停止播放，恢复按钮文本并隐藏进度条。"""
+        try:
+            import winsound
+            winsound.PlaySound(None, winsound.SND_PURGE)
+        except Exception:
+            pass
+        if self._playing_voice == path:
+            self._playing_voice = None
+        if getattr(self, "_voice_tick_job", None) is not None:
+            try:
+                self.root.after_cancel(self._voice_tick_job)
+            except Exception:
+                pass
+            self._voice_tick_job = None
+        bar = self._voice_bars.get(path)
+        if bar is not None:
+            try:
+                bar.pack_forget()
+                bar.set(0)
+            except Exception:
+                pass
+        btn = self._voice_btns.get(path)
+        if btn is not None:
+            try:
+                dur = self._voice_durs.get(path) or 0
+                dur_txt = f"{dur:.0f}″" if dur > 0 else ""
+                btn.configure(text=f"🎤 语音 {dur_txt}")
+            except Exception:
+                pass
+
+    def _voice_tick(self):
+        """播放进度定时刷新：每 100ms 更新一次，播完自动复位。"""
+        path = getattr(self, "_playing_voice", None)
+        if not path:
+            return
+        bar = self._voice_bars.get(path)
+        dur = self._voice_durs.get(path) or 0
+        if bar is not None:
+            try:
+                if dur > 0:
+                    el = time.time() - getattr(self, "_voice_start_ts", time.time())
+                    bar.set(min(1.0, el / dur))
+            except Exception:
+                pass
+        if dur > 0 and (time.time() - getattr(self, "_voice_start_ts", time.time())) >= dur + 0.3:
+            self._stop_voice_play(path, done=True)
+            return
+        self._voice_tick_job = self.root.after(100, self._voice_tick)
 
     def _start_voice(self):
         """按住说话：开始录音。"""
@@ -5474,10 +5546,22 @@ class ChatApp:
         except Exception:
             pass
         dur_txt = f"{dur:.0f}″" if dur > 0 else ""
-        ctk.CTkButton(bubble, text=f"🎤 语音 {dur_txt}", width=130, height=36, corner_radius=16,
-                      fg_color=C("input_bg"), text_color=C("text"),
-                      hover_color=C("input_hover"), font=(FONT, 12),
-                      command=lambda p=path: self._toggle_voice_play(p)).pack(anchor="w", padx=12, pady=6)
+        vbox = ctk.CTkFrame(bubble, fg_color="transparent")
+        vbox.pack(fill="x", padx=12, pady=6)
+        self._voice_btns[path] = ctk.CTkButton(
+            vbox, text=f"🎤 语音 {dur_txt}", width=130, height=34, corner_radius=16,
+            fg_color=C("input_bg"), text_color=C("text"),
+            hover_color=C("input_hover"), font=(FONT, 12),
+            command=lambda p=path: self._toggle_voice_play(p))
+        self._voice_btns[path].pack(anchor="w")
+        # 播放进度条：点击播放时实时显示播放进度（QQ/Discord 风格）
+        bar = ctk.CTkProgressBar(vbox, width=130, height=6, corner_radius=3,
+                                 fg_color=C("input_bg"), progress_color=C("accent"))
+        bar.set(0)
+        bar.pack(anchor="w", pady=(4, 0))
+        bar.pack_forget()  # 默认隐藏，播放时才显示
+        self._voice_bars[path] = bar
+        self._voice_durs[path] = dur
         self._maybe_scroll_bottom()
         self._trim_feed()
 
@@ -5956,6 +6040,11 @@ class ChatApp:
             self._append_message(key, "", f"⚠️ {name}：{info.get('msg', '失败')}", False, system=True)
 
     def _on_close(self):
+        try:
+            if getattr(self, "_playing_voice", None):
+                self._stop_voice_play(self._playing_voice)
+        except Exception:
+            pass
         try:
             _update_settings("window_geometry", self.root.geometry())
         except Exception:

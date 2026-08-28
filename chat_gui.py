@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -590,6 +590,14 @@ def _fmt_time(ts):
     """把时间戳格式化成 HH:MM，无效则返回空串。"""
     try:
         return time.strftime("%H:%M", time.localtime(float(ts)))
+    except Exception:
+        return ""
+
+
+def _fmt_full_time(ts):
+    """把时间戳格式化成完整日期时间，无效则返回空串。"""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(float(ts)))
     except Exception:
         return ""
 
@@ -3433,6 +3441,13 @@ class ChatApp:
 
     # --------------------------- 界面更新 ---------------------------
 
+    def _restore_status(self):
+        """把状态栏恢复为连接状态（悬停显示时间后调用）。"""
+        if self.backend and self.backend.online:
+            self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {len(self._peers)} 人在线", "ok")
+        else:
+            self._set_status("未连接", "mute")
+
     def _set_status(self, msg, color="mute"):
         # color 支持语义键（mute/ok/err/accent）或直接传十六进制色值
         if isinstance(color, str) and color in THEMES.get(_APPEARANCE, THEMES["dark"]):
@@ -3652,6 +3667,15 @@ class ChatApp:
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
+        body.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
+        bubble.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
+        if ts:
+            ft = _fmt_full_time(ts)
+            def _enter(_e, ft=ft): self._set_status(f"{name} · {ft}", "mute")
+            def _leave(_e): self._restore_status()
+            for w in (bubble, body):
+                w.bind("<Enter>", _enter)
+                w.bind("<Leave>", _leave)
         if mine and read_by:
             names = "、".join(read_by[:5])
             if len(read_by) > 5:

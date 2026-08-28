@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.19"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.20"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -461,7 +461,7 @@ def _group_path(room):
 
 
 def _dm_path(cid):
-    return os.path.join(DATA_DIR, "dm_" + (cid or "x") + ".json")
+    return os.path.join(DATA_DIR, "dm_" + _safe_name(cid or "x") + ".json")
 
 
 def _load_group_history(room, limit):
@@ -718,13 +718,13 @@ class MqttBackend:
                 data = json.loads(text)
             except Exception:
                 data = {"name": "匿名"}
-            name = str(data.get("name", "匿名"))
-            rooms = data.get("rooms") or []
+            name = str(data.get("name", "匿名"))[:60]
+            rooms = (data.get("rooms") or [])[:100]
             try:
                 ts = float(data.get("ts") or time.time())
             except Exception:
                 ts = time.time()
-            self.presence[cid] = {"name": name, "rooms": [str(r) for r in rooms], "ts": ts}
+            self.presence[cid] = {"name": name, "rooms": [str(r)[:60] for r in rooms], "ts": ts}
         else:
             self.presence.pop(cid, None)
         self._fire_peers()

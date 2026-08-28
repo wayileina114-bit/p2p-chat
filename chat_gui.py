@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2668,6 +2668,7 @@ class ChatApp:
         self._last_title = ""       # 窗口标题缓存（避免频繁重设）
         self._read_acked = set()     # 已发送过已读回执的消息 mid
         self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
+        self._new_msg_floating = None  # “↓ 新消息”浮标（用户上翻时新消息到达提示）
         self._search_query = ""      # 会话内消息搜索关键词（空 = 未搜索）
         self._msg_search_after = None  # 消息搜索防抖 timer id
         self._suppress_auto_scroll = False  # 全量渲染时抑制逐条自动滚动，避免布局抖动/残影
@@ -5315,6 +5316,10 @@ class ChatApp:
 
     def _scroll_bottom_now(self):
         try:
+            self._hide_new_msg_floating()
+        except Exception:
+            pass
+        try:
             canvas = self.feed._parent_canvas
             canvas.update_idletasks()
             canvas.configure(scrollregion=canvas.bbox("all"))
@@ -5356,7 +5361,8 @@ class ChatApp:
     def _maybe_scroll_bottom(self):
         """新内容到达时，仅当用户此前已贴底才自动滚动，避免打断向上翻阅历史。
         必须在内容 append 前调用 _at_bottom() 记录 _stick_bottom，否则新内容已把
-        视口顶出底部，会误判成“用户在上翻”。"""
+        视口顶出底部，会误判成“用户在上翻”。
+        用户上翻时新消息到达：底部显示“↓ 新消息”浮标，点击回到最新。"""
         if self._suppress_auto_scroll:
             return
         def _do():
@@ -5366,10 +5372,47 @@ class ChatApp:
                 canvas.configure(scrollregion=canvas.bbox("all"))
                 if self._stick_bottom:
                     canvas.yview_moveto(1.0)
+                else:
+                    self._show_new_msg_floating()
             except Exception:
                 pass
         try:
             self.root.after(1, _do)
+        except Exception:
+            pass
+
+    def _show_new_msg_floating(self):
+        """底部“↓ 新消息”浮标：用户在上翻时新消息到达后可点击返回最新。"""
+        try:
+            if getattr(self, "_new_msg_floating", None) is not None:
+                return
+            host = self.feed.master
+            btn = ctk.CTkButton(host, text="↓ 新消息", height=28, corner_radius=14,
+                                fg_color=C("accent"), hover_color=C("accent_hover"),
+                                text_color="#ffffff", font=(FONT, 11, "bold"),
+                                command=self._goto_newest)
+            btn.place(relx=0.5, rely=0.94, anchor="s")
+            self._new_msg_floating = btn
+        except Exception:
+            pass
+
+    def _goto_newest(self):
+        """点击浮标：回到最新并隐藏浮标。"""
+        try:
+            self._hide_new_msg_floating()
+        except Exception:
+            pass
+        self._scroll_bottom_now()
+        self._stick_bottom = True
+
+    def _hide_new_msg_floating(self):
+        try:
+            if getattr(self, "_new_msg_floating", None) is not None:
+                try:
+                    self._new_msg_floating.destroy()
+                except Exception:
+                    pass
+                self._new_msg_floating = None
         except Exception:
             pass
 
@@ -5516,8 +5559,8 @@ class ChatApp:
         if mid:
             self._body_labels[mid] = body
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
-        body.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
-        bubble.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
+        body.bind("<Double-Button-1>", lambda e, t=text, n=name: self._start_reply(n, t))
+        bubble.bind("<Double-Button-1>", lambda e, t=text, n=name: self._start_reply(n, t))
         # 消息内链接：识别 URL 生成可点击标签（QQ/微信/Discord 风格，点击浏览器打开）
         urls = _extract_urls(text)
         if urls:

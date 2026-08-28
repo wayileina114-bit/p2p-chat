@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1021,6 +1021,7 @@ class MqttBackend:
 class ChatApp:
     FEED_MAX = 400         # 每个会话持久化的历史消息上限
     RENDER_MAX = 150       # 切换会话时最多立即渲染的消息条数（更早的折叠）
+    GROUP_GAP = 300        # 同一发送者连续消息合并的间隔（秒，5 分钟）
 
     GROUP_PREFIX = "room|"
     DM_PREFIX = "dm|"
@@ -1651,10 +1652,11 @@ class ChatApp:
             s["messages"] = s["messages"][-self.FEED_MAX:]
         self._save_session(s)
         if key == self._current:
+            show_head = self._should_show_head(s["messages"], len(s["messages"]) - 1)
             if img_path and os.path.isfile(img_path):
-                self._add_image_bubble(name, img_path, mine, msg.get("ts"))
+                self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
             else:
-                self._add_bubble(name, text, mine, msg.get("ts"))
+                self._add_bubble(name, text, mine, msg.get("ts"), show_head)
         else:
             s["unread"] = s.get("unread", 0) + 1
             self._apply_session_list()
@@ -2007,30 +2009,42 @@ class ChatApp:
         self._scroll_bottom()
         self._trim_feed()
 
-    def _add_bubble(self, name, text, mine, ts=None):
+    @staticmethod
+    def _should_show_head(msgs, idx):
+        """Discord 式消息分组：同一发送者 5 分钟内的连续消息，仅第一条显示名字行。"""
+        if idx <= 0:
+            return True
+        prev = msgs[idx - 1]
+        cur = msgs[idx]
+        if prev.get("name") != cur.get("name") or bool(prev.get("mine")) != bool(cur.get("mine")):
+            return True
+        return (cur.get("ts") or 0) - (prev.get("ts") or 0) >= ChatApp.GROUP_GAP
+
+    def _add_bubble(self, name, text, mine, ts=None, show_head=True):
         tstr = _fmt_time(ts) if ts else ""
         bubble = ctk.CTkFrame(self.feed, corner_radius=14,
                               fg_color=(C("mine_bubble") if mine else C("other_bubble")))
-        bubble.pack(anchor="e" if mine else "w", padx=12, pady=3)
-        head = ctk.CTkFrame(bubble, fg_color="transparent")
-        head.pack(fill="x", padx=12, pady=(6, 0))
-        ctk.CTkLabel(head, text=name, text_color=C("text_mute"),
-                     font=(FONT, 10)).pack(side="left")
-        if tstr:
-            ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
-                         font=(FONT, 9)).pack(side="right")
+        bubble.pack(anchor="e" if mine else "w", padx=12, pady=(6 if show_head else 1))
+        if show_head:
+            head = ctk.CTkFrame(bubble, fg_color="transparent")
+            head.pack(fill="x", padx=12, pady=(6, 0))
+            ctk.CTkLabel(head, text=name, text_color=C("text_mute"),
+                         font=(FONT, 10)).pack(side="left")
+            if tstr:
+                ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
+                             font=(FONT, 9)).pack(side="right")
         body = ctk.CTkLabel(bubble, text=text, wraplength=460, justify="left",
                             text_color=(C("mine_text") if mine else C("other_text")),
                             font=(FONT, 12))
-        body.pack(anchor="w", padx=12, pady=(2, 8))
+        body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
         body.bind("<Button-3>", lambda e, t=text: self._copy_text_menu(e, t))
         self._scroll_bottom()
         self._trim_feed()
 
-    def _add_image_bubble(self, name, path, mine, ts=None):
+    def _add_image_bubble(self, name, path, mine, ts=None, show_head=True):
         tstr = _fmt_time(ts) if ts else ""
         if not (_HAS_PIL and path and os.path.isfile(path)):
-            self._add_bubble(name, "🖼 一张图片", mine, ts)
+            self._add_bubble(name, "🖼 一张图片", mine, ts, show_head)
             return
         try:
             # 缩略图缓存：按 路径+mtime 复用已解码的 CTkImage，避免每次切会话都重新解码整张图
@@ -2051,14 +2065,15 @@ class ChatApp:
             self._images.append(ctk_img)
             bubble = ctk.CTkFrame(self.feed, corner_radius=14,
                                   fg_color=(C("mine_bubble") if mine else C("other_bubble")))
-            bubble.pack(anchor="e" if mine else "w", padx=12, pady=3)
-            head = ctk.CTkFrame(bubble, fg_color="transparent")
-            head.pack(fill="x", padx=12, pady=(6, 2))
-            ctk.CTkLabel(head, text=f"{name} · 图片", text_color=C("text_mute"),
-                         font=(FONT, 10)).pack(side="left")
-            if tstr:
-                ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
-                             font=(FONT, 9)).pack(side="right")
+            bubble.pack(anchor="e" if mine else "w", padx=12, pady=(6 if show_head else 1))
+            if show_head:
+                head = ctk.CTkFrame(bubble, fg_color="transparent")
+                head.pack(fill="x", padx=12, pady=(6, 2))
+                ctk.CTkLabel(head, text=f"{name} · 图片", text_color=C("text_mute"),
+                             font=(FONT, 10)).pack(side="left")
+                if tstr:
+                    ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
+                                 font=(FONT, 9)).pack(side="right")
             _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
             _img.pack(padx=6, pady=4)
             _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
@@ -2122,17 +2137,19 @@ class ChatApp:
                          justify="center").pack(pady=4)
             msgs = msgs[-self.RENDER_MAX:]
         last_day = None
-        for m in msgs:
+        for idx, m in enumerate(msgs):
             ts = m.get("ts")
             dlabel = _day_label(ts) if ts else ""
-            if dlabel and dlabel != last_day:
+            day_break = bool(dlabel and dlabel != last_day)
+            if day_break:
                 ctk.CTkLabel(self.feed, text=f"── {dlabel} ──", text_color=C("text_mute"),
                              font=(FONT, 10)).pack(pady=(8, 2))
                 last_day = dlabel
+            show_head = day_break or self._should_show_head(msgs, idx)
             if m.get("img_path") and os.path.isfile(m["img_path"]):
-                self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts)
+                self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
             else:
-                self._add_bubble(m["name"], m["text"], m["mine"], ts)
+                self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head)
         self._scroll_bottom()
 
     def _show_file_event(self, room, event, info):

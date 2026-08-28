@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1396,7 +1396,7 @@ def _ver_parts(v):
 
 class ChatApp:
     FEED_MAX = 400         # 每个会话持久化的历史消息上限
-    RENDER_MAX = 150       # 切换会话时最多立即渲染的消息条数（更早的折叠）
+    RENDER_MAX = 50        # 切换会话时最多立即渲染的消息条数（更早的折叠；降低以提速渲染）
     GROUP_GAP = 300        # 同一发送者连续消息合并的间隔（秒，5 分钟）
 
     GROUP_PREFIX = "room|"
@@ -1721,7 +1721,7 @@ class ChatApp:
                 self.root.after_cancel(self._list_after)
             except Exception:
                 pass
-        self._list_after = self.root.after(150, self._apply_session_list)
+        self._list_after = self.root.after(250, self._apply_session_list)
 
     def _open_downloads(self):
         try:
@@ -2195,7 +2195,7 @@ class ChatApp:
                     self._add_bubble(name, text, mine, msg.get("ts"), show_head, file_path=file_path)
         else:
             s["unread"] = s.get("unread", 0) + 1
-            self._apply_session_list()
+            self._schedule_session_list()
             self._update_window_title()
             if not mine:
                 self._flash_window()
@@ -2597,35 +2597,38 @@ class ChatApp:
         except Exception:
             pass
 
-    def _refresh_scrollregion(self):
-        """强制刷新 canvas 的 scrollregion（新内容 pack 后布局是惰性更新的）。"""
+    def _scroll_bottom_now(self):
         try:
             canvas = self.feed._parent_canvas
             canvas.update_idletasks()
             canvas.configure(scrollregion=canvas.bbox("all"))
-            return canvas
+            canvas.yview_moveto(1.0)
         except Exception:
-            return None
+            pass
 
     def _scroll_bottom(self):
-        canvas = self._refresh_scrollregion()
-        if canvas is not None:
-            try:
-                canvas.yview_moveto(1.0)
-            except Exception:
-                pass
+        """延迟到下一帧再滚动，确保新内容布局完成、scrollregion 已更新。"""
+        try:
+            self.root.after(1, self._scroll_bottom_now)
+        except Exception:
+            pass
 
     def _maybe_scroll_bottom(self):
         """新内容到达时，仅当用户已在底部附近才自动滚动，避免打断向上翻阅历史。"""
-        canvas = self._refresh_scrollregion()
-        if canvas is None:
-            return
+        def _do():
+            try:
+                canvas = self.feed._parent_canvas
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                _top, bottom = canvas.yview()
+                if float(bottom) >= 0.98:
+                    canvas.yview_moveto(1.0)
+            except Exception:
+                pass
         try:
-            _top, bottom = canvas.yview()
-            if float(bottom) >= 0.98:
-                canvas.yview_moveto(1.0)
+            self.root.after(1, _do)
         except Exception:
-            self._scroll_bottom()
+            pass
 
     def _add_file_offer_card(self, key, room, info):
         # 在聊天区渲染一条需手动确认的文件请求卡片（不弹窗）

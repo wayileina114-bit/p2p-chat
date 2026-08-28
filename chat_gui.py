@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -112,17 +112,58 @@ FONT = "Microsoft YaHei UI"
 HINT = "输入文字，回车发送；也可直接把图片 / 文件拖到这里"
 
 EMOJIS = [
+    # 表情 1
     "😀","😁","😂","🤣","😊","😇","🙂","😉","😍","🥰",
-    "😘","😜","🤪","🤔","🤨","😐","😶","🙄","😏","😣",
-    "😥","😮","🤯","😴","🥱","😷","🤒","🥵","🥶","😎",
-    "🤓","🥳","😡","😠","🤬","😱","😨","😰","😢","😭",
-    "😤","😩","🥺","🤗","🤭","🤫","😌","😪","🤤","🥴",
-    "😳","🤡","👋","🤝","👍","👎","👏","🙏","💪","🤞",
-    "🤟","✌️","🤙","❤️","🧡","💛","💚","💙","💜","🖤",
-    "🤍","💔","💯","✨","⭐","🌟","⚡","🔥","💥","💫",
-    "🌈","☀️","🌙","🍀","🌹","🌸","🎉","🎊","🎁","🏆",
-    "🥇","🚀","✈️","🚗","⏰","⌛","📌","📎","🔒","🔑",
-    "🔍","💡","📈","📉","🎵","🎶","🎮","🎯","🏀","⚽",
+    "😘","😗","😙","😚","😋","😛","😝","😜","🤪","🤨",
+    "🧐","🤓","😎","🥸","🤩","🥳","😏","😒","😞","😔",
+    "😟","😕","🙁","☹️","😣","😖","😫","😩","🥺","😢",
+    "😭","😤","😠","😡","🤬","🤯","😳","🥵","🥶","😱",
+    "😨","😰","😥","😓","🤗","🤔","🫡","🤭","🤫","🤥",
+    "😶","😐","😑","😬","🙄","😯","😦","😧","😮","😲",
+    "🥱","😴","🤤","😪","😵","🤐","🥴","🤢","🤮","🤧",
+    "😷","🤒","🤕","🤑","🤠","😈","👿","👹","👺","🤡",
+    "💩","👻","💀","👽","👾","🤖","🎃","😺","😸","😹",
+    # 手势 / 人
+    "😻","😼","😽","🙀","😿","😾","🙈","🙉","🙊","👋",
+    "🤚","🖐️","✋","🖖","👌","🤌","🤏","✌️","🤞","🫰",
+    "🤟","🤘","🤙","👈","👉","👆","🖕","👇","☝️","👍",
+    "👎","✊","👊","🤛","🤜","👏","🙌","👐","🤲","🤝",
+    "🙏","✍️","💅","🤳","💪","🦾","🦵","🦶","👂","🦻",
+    "👃","🧠","🦷","👀","👁️","👅","👄","👶","🧒","👦",
+    # 心形 / 符号
+    "❤️","🧡","💛","💚","💙","💜","🖤","🤍","🤎","💔",
+    "❣️","💕","💞","💓","💗","💖","💘","💝","💟","♥️",
+    "💯","💢","💥","💫","💦","💨","💣","💬","💭","💤",
+    "🔥","✨","⭐","🌟","⚡","🌈","☀️","☁️","⛅","🌤️",
+    "🌥️","🌦️","🌧️","⛈️","🌩️","🌨️","❄️","☃️","⛄","💧",
+    "🌊","🌋","🌍","🌎","🌏","🌱","🌿","🍀","🍁","🍂",
+    # 植物 / 食物
+    "🍃","🌾","🌺","🌻","🌼","🌸","🌷","🌹","🥀","🌵",
+    "🌲","🌳","🌴","🪴","🍄","🍏","🍎","🍐","🍊","🍋",
+    "🍌","🍉","🍇","🍓","🫐","🍈","🍒","🍑","🥭","🍍",
+    "🥥","🥝","🍅","🍆","🥑","🥦","🥬","🥒","🌶️","🫑",
+    "🌽","🥕","🫒","🧄","🧅","🥔","🍠","🥐","🥯","🍞",
+    "🥖","🥨","🧀","🥚","🍳","🥞","🧇","🥓","🥩","🍗",
+    # 主食 / 甜品 / 饮料
+    "🍖","🦴","🌭","🍔","🍟","🍕","🫓","🥪","🥙","🧆",
+    "🌮","🌯","🫔","🥗","🥘","🫕","🥣","🍛","🍜","🍝",
+    "🍢","🍣","🍤","🍥","🥮","🍡","🥟","🦪","🍦","🍧",
+    "🍨","🍩","🍪","🎂","🍰","🧁","🥧","🍫","🍬","🍭",
+    "🍮","🍯","🍼","🥛","☕","🫖","🍵","🍶","🍾","🍷",
+    "🍸","🍹","🍺","🍻","🥂","🥃","🫗","🧊","🎉","🎊",
+    # 活动 / 运动 / 物品
+    "🎁","🏆","🥇","🥈","🥉","🏅","🎖️","🎗️","🎫","🎟️",
+    "🎪","🤹","🎭","🎨","🎬","🎤","🎧","🎼","🎹","🥁",
+    "🎷","🎺","🎸","🪕","🎻","🎞️","📷","📸","📹","📼",
+    "🔍","🔎","💡","🔦","🏮","🪔","📔","📕","📖","📗",
+    "📘","📙","📚","📓","📒","📃","📜","📄","📰","🗞️",
+    "📑","🔖","🏷️","💰","💴","💵","💶","💷","💸","💳",
+    "🧾","✉️","📩","📨","📧","💌","📥","📤","📦","📌",
+    "📍","📎","🖇️","📏","📐","📊","📈","📉","🗑️","🔒",
+    "🔑","🔨","🪓","⛏️","⚒️","🛠️","🗡️","⚔️","🔫","🏹",
+    "🛡️","🚗","🚕","🚙","🚌","🚎","🏎️","🚓","🚑","🚒",
+    "🚐","🛻","🚚","🚛","🚜","🛵","🏍️","🚲","🛴","🛹",
+    "⛵","🚤","🛳️","✈️","🛩️","🚁","🚀","🛸","⌛","⏳",
 ]
 
 
@@ -3976,25 +4017,45 @@ class ChatApp:
             self._set_status("录音太短，已取消", "mute")
 
     def _toggle_emoji_panel(self):
-        if getattr(self, "_emoji_win", None) is not None:
-            self._close_emoji_panel()
-            return
+        win = getattr(self, "_emoji_win", None)
+        if win is not None:
+            try:
+                if win.winfo_exists() and win.state() == "normal":
+                    self._close_emoji_panel()
+                    return
+            except Exception:
+                win = None
+        if win is None:
+            # 首次创建面板（之后只隐藏/显示复用，开关瞬时完成）
+            try:
+                win = ctk.CTkToplevel(self.root)
+                self._emoji_win = win
+                win.overrideredirect(True)
+                win.configure(fg_color=C("panel"))
+                win.attributes("-topmost", True)
+                cols = 10
+                scroll = ctk.CTkScrollableFrame(win, width=cols * 38 + 10, height=280,
+                                                fg_color="transparent")
+                scroll.pack(padx=4, pady=4)
+                grid = ctk.CTkFrame(scroll, fg_color="transparent")
+                grid.pack()
+                for i, em in enumerate(EMOJIS):
+                    lbl = ctk.CTkLabel(grid, text=em, width=34, height=34, corner_radius=8,
+                                       fg_color="transparent", text_color=C("text"),
+                                       font=("Segoe UI Emoji", 15), cursor="hand2")
+                    lbl.grid(row=i // cols, column=i % cols, padx=1, pady=1)
+                    lbl.bind("<Button-1>", lambda e, em=em: self._insert_emoji(em))
+                    lbl.bind("<Enter>", lambda e, l=lbl: l.configure(fg_color=C("hover")))
+                    lbl.bind("<Leave>", lambda e, l=lbl: l.configure(fg_color="transparent"))
+                win.bind("<Escape>", lambda e: self._close_emoji_panel())
+                win.withdraw()  # 先隐藏，避免闪现
+            except Exception:
+                self._emoji_win = None
+                return
+        # 显示（复用，瞬时）
         try:
-            win = ctk.CTkToplevel(self.root)
-            self._emoji_win = win
-            win.overrideredirect(True)
-            win.configure(fg_color=C("panel"))
+            win.deiconify()
             win.attributes("-topmost", True)
-            cols = 10
-            grid = ctk.CTkFrame(win, fg_color="transparent")
-            grid.pack(padx=6, pady=6)
-            for i, em in enumerate(EMOJIS):
-                ctk.CTkButton(grid, text=em, width=34, height=34, corner_radius=8,
-                              fg_color="transparent", hover_color=C("hover"),
-                              text_color=C("text"), font=("Segoe UI Emoji", 15),
-                              command=lambda e=em: self._insert_emoji(e)
-                              ).grid(row=i // cols, column=i % cols, padx=1, pady=1)
-            win.bind("<Escape>", lambda e: self._close_emoji_panel())
             win.update_idletasks()
             w = win.winfo_reqwidth()
             h = win.winfo_reqheight()
@@ -4002,15 +4063,16 @@ class ChatApp:
             y = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
             win.geometry(f"+{max(0, x)}+{max(0, y)}")
         except Exception:
-            self._emoji_win = None
+            pass
 
     def _close_emoji_panel(self):
-        if getattr(self, "_emoji_win", None) is not None:
+        win = getattr(self, "_emoji_win", None)
+        if win is not None:
             try:
-                self._emoji_win.destroy()
+                if win.winfo_exists():
+                    win.withdraw()  # 隐藏复用，不销毁
             except Exception:
-                pass
-            self._emoji_win = None
+                self._emoji_win = None
 
     def _insert_emoji(self, em):
         try:

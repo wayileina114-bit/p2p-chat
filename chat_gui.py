@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3740,6 +3740,7 @@ class ChatApp:
         try:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
+            menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text))
             if mid:
                 menu.add_command(label=("取消置顶" if self._is_pinned(mid) else "置顶"),
@@ -3756,6 +3757,50 @@ class ChatApp:
                 menu.grab_release()
             except Exception:
                 pass
+
+    def _forward_dialog(self, text):
+        """弹出转发目标选择框，把文本转发到指定会话。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("转发到…")
+            win.geometry("360x440")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="选择转发目标", font=(FONT, 13, "bold"),
+                         text_color=C("text")).pack(pady=(14, 4))
+            scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
+            scroll.pack(fill="both", expand=True, padx=12, pady=8)
+            for room in self._rooms:
+                ctk.CTkButton(scroll, text=f"# {room}", height=32, corner_radius=8,
+                              anchor="w", fg_color=C("input_bg"), text_color=C("text"),
+                              hover_color=C("input_hover"), font=(FONT, 12),
+                              command=lambda r=room: self._do_forward(r, text, False, win)).pack(fill="x", pady=2)
+            for s in list(self._sessions.values()):
+                if s.get("kind") == "dm":
+                    ctk.CTkButton(scroll, text=f"@ {s['name']}", height=32, corner_radius=8,
+                                  anchor="w", fg_color=C("input_bg"), text_color=C("text"),
+                                  hover_color=C("input_hover"), font=(FONT, 12),
+                                  command=lambda s=s: self._do_forward(s["cid"], text, True, win)).pack(fill="x", pady=2)
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
+    def _do_forward(self, target, text, is_dm, win):
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        if not (self.backend and self.backend.online):
+            self._set_status("未连接，无法转发", "err")
+            return
+        my = self.nick_var.get().strip() or "未命名"
+        if is_dm:
+            if self.backend.send_dm(target, text):
+                self._append_message(self._dm_key(target), my, text, True)
+                self._set_status("已转发", "ok")
+        else:
+            if self.backend.send_text(target, text):
+                self._set_status("已转发", "ok")
 
     def _edit_message_dialog(self, mid, text):
         """弹出编辑消息对话框（预填原文，保存后提交编辑）。"""

@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -527,6 +527,30 @@ def _save_rooms(rooms):
     try:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(list(rooms), f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _load_contacts():
+    """加载收藏的联系人列表 [{cid, name}]。"""
+    _ensure_data_dir()
+    p = os.path.join(DATA_DIR, "contacts.json")
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            arr = json.load(f)
+            if isinstance(arr, list):
+                return [{"cid": str(x.get("cid", "")), "name": str(x.get("name", "？"))}
+                        for x in arr if isinstance(x, dict) and x.get("cid")]
+    except Exception:
+        pass
+    return []
+
+
+def _save_contacts(contacts):
+    _ensure_data_dir()
+    try:
+        with open(os.path.join(DATA_DIR, "contacts.json"), "w", encoding="utf-8") as f:
+            json.dump(list(contacts), f, ensure_ascii=False)
     except Exception:
         pass
 
@@ -1646,6 +1670,7 @@ class ChatApp:
 
         # 恢复房间与会话
         self._rooms = _load_rooms() or _scan_group_rooms()
+        self._contacts = _load_contacts()
         if not self._rooms:
             default = self.room_var.get().strip() or "默认房间"
             self._rooms = [default]
@@ -2237,6 +2262,24 @@ class ChatApp:
         s["online"] = True
         self._switch_to(s["key"])
 
+    def _is_contact(self, cid):
+        return any(c["cid"] == cid for c in self._contacts)
+
+    def _toggle_contact(self, cid, name):
+        """收藏 / 取消收藏一个联系人。"""
+        name = (name or "").strip() or "？"
+        for c in self._contacts:
+            if c["cid"] == cid:
+                self._contacts.remove(c)
+                _save_contacts(self._contacts)
+                self._apply_session_list()
+                self._set_status("已取消收藏", "ok")
+                return
+        self._contacts.append({"cid": cid, "name": name})
+        _save_contacts(self._contacts)
+        self._apply_session_list()
+        self._set_status("已收藏联系人", "ok")
+
     def _update_chat_title(self):
         s = self._sessions.get(self._current)
         if s is None:
@@ -2305,7 +2348,13 @@ class ChatApp:
                          if cid != self.cid and cid not in dm_cids
                          and ((not kw) or kw in p["name"].lower())]
 
-        total = len(groups) + len(dms) + len(online_others)
+        favorites = [c for c in self._contacts if c["cid"] not in dm_cids
+                     and ((not kw) or kw in c["name"].lower())]
+        total = len(groups) + len(dms) + len(online_others) + len(favorites)
+        if favorites:
+            self._add_section_header("★ 收藏")
+            for c in favorites:
+                self._add_contact_item(c)
         if groups:
             self._add_section_header("群聊")
             for r in groups:
@@ -2420,6 +2469,33 @@ class ChatApp:
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
             w.bind("<Button-3>", lambda e, s=s: self._dm_context_menu(e, s))
         self._bind_row_hover(row, selected)
+
+    def _add_contact_item(self, c):
+        """收藏联系人条目：点击发起私聊，右键取消收藏。"""
+        cid, name = c["cid"], c["name"]
+        row = ctk.CTkFrame(self.session_frame, corner_radius=8, fg_color="transparent")
+        row.pack(fill="x", pady=1)
+        star = ctk.CTkLabel(row, text="★", width=18, anchor="w", text_color=C("accent"),
+                            font=(FONT, 12, "bold"), cursor="hand2")
+        star.pack(side="left", padx=(10, 0), pady=7)
+        lbl = ctk.CTkLabel(row, text=name, anchor="w", text_color=C("text"),
+                           font=(FONT, 12), cursor="hand2")
+        lbl.pack(side="left", fill="x", expand=True, pady=7)
+        for w in (row, lbl, star):
+            w.bind("<Button-1>", lambda e, c=cid, nm=name: self._start_dm(c, nm))
+        row.bind("<Button-3>", lambda e, c=cid, nm=name: self._contact_context_menu(e, c, nm))
+        self._bind_row_hover(row, False)
+
+    def _contact_context_menu(self, event, cid, name):
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="取消收藏", command=lambda: self._toggle_contact(cid, name))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
     def _add_member_item(self, cid, name):
         row = ctk.CTkFrame(self.session_frame, corner_radius=8, fg_color="transparent")
@@ -2745,6 +2821,9 @@ class ChatApp:
     def _dm_context_menu(self, event, s):
         try:
             menu = tk.Menu(self.root, tearoff=0)
+            fav = self._is_contact(s["cid"])
+            menu.add_command(label=("取消收藏" if fav else "★ 收藏联系人"),
+                             command=lambda: self._toggle_contact(s["cid"], s["name"]))
             menu.add_command(label="删除会话", command=lambda: self._delete_dm_session(s["key"]))
             menu.tk_popup(event.x_root, event.y_root)
         finally:

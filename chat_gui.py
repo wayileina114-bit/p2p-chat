@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -658,6 +658,22 @@ def _extract_urls(text):
         return out[:6]
     except Exception:
         return []
+
+
+def _extract_mentions(text, names):
+    """从消息文本中提取 @提及的昵称（匹配当前会话可提及成员）。"""
+    out = []
+    try:
+        for n in names or []:
+            n = str(n).strip()
+            if not n:
+                continue
+            tag = "@" + n
+            if tag in str(text or "") and n not in out:
+                out.append(n)
+    except Exception:
+        pass
+    return out[:8]
 
 
 def _open_url(url):
@@ -5835,6 +5851,19 @@ class ChatApp:
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
         body.bind("<Double-Button-1>", lambda e, t=text, n=name: self._start_reply(n, t))
         bubble.bind("<Double-Button-1>", lambda e, t=text, n=name: self._start_reply(n, t))
+        # 消息内 @提及高亮：识别 @昵称 生成可点击标签（点击直接引用回复该成员）
+        m_names = self._mention_names()
+        mentions = _extract_mentions(text, m_names)
+        if mentions:
+            row_m = ctk.CTkFrame(bubble, fg_color="transparent")
+            row_m.pack(anchor="w", padx=12, pady=(0, 2))
+            ctk.CTkLabel(row_m, text="提及 ", text_color=C("text_mute"),
+                         font=(FONT, 9)).pack(side="left")
+            for mn in mentions[:4]:
+                tag = ctk.CTkLabel(row_m, text="@" + mn, text_color=C("accent"),
+                                   font=(FONT, 9, "bold"), cursor="hand2")
+                tag.pack(side="left", padx=(0, 4))
+                tag.bind("<Button-1>", lambda e, mn=mn: self._start_reply(mn, str(text)[:60]))
         # 消息内链接：识别 URL 生成可点击标签（QQ/微信/Discord 风格，点击浏览器打开）
         urls = _extract_urls(text)
         if urls:

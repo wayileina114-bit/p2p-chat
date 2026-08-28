@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.22"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.23"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -81,6 +81,7 @@ MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
 PRESENCE_TTL = 120.0             # 在线名单过期时间（秒），超时视为下线（兜底 will 丢失）
+MAX_TEXT = 10000                 # 单条文字消息长度上限（防异常/恶意超长消息撑爆界面）
 
 FONT = "Microsoft YaHei UI"
 HINT = "输入文字，回车发送；也可直接把图片 / 文件拖到这里"
@@ -707,7 +708,8 @@ class MqttBackend:
             return
         if data.get("cid") == self.cid:
             return
-        self._fire_text(room, str(data.get("name", "匿名")), str(data.get("text", "")), False)
+        self._fire_text(room, str(data.get("name", "匿名"))[:60],
+                        str(data.get("text", ""))[:MAX_TEXT], False)
 
     def _handle_presence(self, topic, raw):
         cid = topic.rsplit("/", 1)[-1]
@@ -774,7 +776,8 @@ class MqttBackend:
         if not sender or sender == self.cid:
             return
         if self.on_dm:
-            self.on_dm(sender, str(data.get("name", "匿名")), str(data.get("text", "")))
+            self.on_dm(sender, str(data.get("name", "匿名"))[:60],
+                       str(data.get("text", ""))[:MAX_TEXT])
 
     # --------------------------- 文件控制 ---------------------------
 

@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -605,6 +605,8 @@ def _norm_msg(m):
             msg["recalled_by"] = str(m["recalled_by"])
     if m.get("edited"):
         msg["edited"] = True
+    if m.get("reply"):
+        msg["reply"] = dict(m["reply"])
     if m.get("preview_tid"):
         msg["preview_tid"] = str(m["preview_tid"])
     if m.get("ts"):
@@ -933,7 +935,8 @@ class MqttBackend:
             return
         self._auto_delivered(room, str(data.get("mid", "")), False)
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
-                        str(data.get("text", ""))[:MAX_TEXT], False, str(data.get("mid", "")))
+                        str(data.get("text", ""))[:MAX_TEXT], False, str(data.get("mid", "")),
+                        data.get("reply"))
 
     def _handle_presence(self, topic, raw):
         cid = topic.rsplit("/", 1)[-1]
@@ -1023,7 +1026,8 @@ class MqttBackend:
         self._auto_delivered(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), True)
         if self.on_dm:
             self.on_dm(sender, str(data.get("name", "匿名"))[:60],
-                       str(data.get("text", ""))[:MAX_TEXT], str(data.get("mid", "")))
+                       str(data.get("text", ""))[:MAX_TEXT], str(data.get("mid", "")),
+                       data.get("reply"))
 
     # --------------------------- 文件控制 ---------------------------
 
@@ -1290,24 +1294,30 @@ class MqttBackend:
 
     # --------------------------- 发送 ---------------------------
 
-    def send_text(self, room, text):
+    def send_text(self, room, text, reply=None):
         text = (text or "").strip()
         if not text or room not in self.rooms or not self.online or self._client is None:
             return False
         mid = uuid.uuid4().hex[:12]
-        payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}, ensure_ascii=False)
+        obj = {"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}
+        if reply:
+            obj["reply"] = reply
+        payload = json.dumps(obj, ensure_ascii=False)
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(self._topic_room(room) + "/msg", payload, qos=1)
-        self._fire_text(room, self.nickname, text, True, mid)
+        self._fire_text(room, self.nickname, text, True, mid, reply)
         return True
 
-    def send_dm(self, target_cid, text):
+    def send_dm(self, target_cid, text, reply=None):
         text = (text or "").strip()
         if not text or not self.online or self._client is None or not target_cid:
             return False
         mid = uuid.uuid4().hex[:12]
-        payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}, ensure_ascii=False)
+        obj = {"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}
+        if reply:
+            obj["reply"] = reply
+        payload = json.dumps(obj, ensure_ascii=False)
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(f"{self.NS}/dms/{target_cid}", payload, qos=1)
@@ -1514,9 +1524,9 @@ class MqttBackend:
 
     # --------------------------- 回调触发 ---------------------------
 
-    def _fire_text(self, room, name, text, mine=False, mid=None):
+    def _fire_text(self, room, name, text, mine=False, mid=None, reply=None):
         if self.on_text:
-            self.on_text(room, name, text, mine, mid)
+            self.on_text(room, name, text, mine, mid, reply)
 
     def _fire_recall(self, room, mid, who):
         if self.on_recall:
@@ -1609,6 +1619,7 @@ class ChatApp:
         self._typing_after = None      # “正在输入”提示的延时恢复 timer id
         self._typing_last = 0.0        # 上次发送“正在输入”广播的时间戳（节流用）
         self._members_visible = False  # 成员列表面板是否展开
+        self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1778,9 +1789,13 @@ class ChatApp:
             except Exception:
                 pass
 
+        # 引用回复提示栏（默认隐藏）
+        self.reply_bar = ctk.CTkFrame(right, corner_radius=8, fg_color=C("warn_bg"))
+
         # 底部输入区
-        ibar = ctk.CTkFrame(right, corner_radius=12, fg_color=C("panel"))
-        ibar.pack(fill="x", padx=8, pady=(4, 10))
+        self._ibar = ctk.CTkFrame(right, corner_radius=12, fg_color=C("panel"))
+        self._ibar.pack(fill="x", padx=8, pady=(4, 10))
+        ibar = self._ibar
 
         self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=10, border_width=0,
                                         fg_color=C("input_bg"), text_color=C("text_mute"),
@@ -2446,7 +2461,7 @@ class ChatApp:
         except Exception:
             pass
 
-    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False, mid=None, preview_tid=None):
+    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False, mid=None, preview_tid=None, reply=None):
         s = self._sessions.get(key)
         if s is None:
             return
@@ -2461,6 +2476,8 @@ class ChatApp:
             msg["img_path"] = img_path
         if file_path:
             msg["file_path"] = file_path
+        if reply:
+            msg["reply"] = reply
         s["messages"].append(msg)
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
@@ -2758,14 +2775,18 @@ class ChatApp:
         if s is None:
             return
         my = self.nick_var.get().strip() or "未命名"
+        reply = self._reply_to
         if s["kind"] == "dm":
-            if self.backend.send_dm(s["cid"], text):
-                self._append_message(s["key"], my, text, True)
+            if self.backend.send_dm(s["cid"], text, reply):
+                self._append_message(s["key"], my, text, True, reply=reply)
+                self._cancel_reply()
             else:
                 self.input_box.insert("1.0", text)
                 self._show_system("发送失败，请检查连接。")
         else:
-            if not self.backend.send_text(s["room"], text):
+            if self.backend.send_text(s["room"], text, reply):
+                self._cancel_reply()
+            else:
                 self.input_box.insert("1.0", text)
                 self._show_system("发送失败，请检查连接。")
 
@@ -2971,8 +2992,8 @@ class ChatApp:
 
     # --------------------------- 回调（切回主线程） ---------------------------
 
-    def _cb_text(self, room, name, text, mine, mid=None):
-        self.root.after(0, lambda: self._append_message(self._group_key(room), name, text, mine, mid=mid))
+    def _cb_text(self, room, name, text, mine, mid=None, reply=None):
+        self.root.after(0, lambda: self._append_message(self._group_key(room), name, text, mine, mid=mid, reply=reply))
 
     def _cb_peers(self, peers):
         self.root.after(0, lambda: self._refresh_peers(peers))
@@ -2983,8 +3004,8 @@ class ChatApp:
     def _cb_status(self, online, msg):
         self.root.after(0, lambda: self._set_status(msg, "ok" if online else "err"))
 
-    def _cb_dm(self, from_cid, name, text, mid=None):
-        self.root.after(0, lambda: self._receive_dm(from_cid, name, text, mid))
+    def _cb_dm(self, from_cid, name, text, mid=None, reply=None):
+        self.root.after(0, lambda: self._receive_dm(from_cid, name, text, mid, reply))
 
     def _cb_read(self, room, mid, cid, name):
         self.root.after(0, lambda: self._receive_read(room, mid, cid, name))
@@ -3052,10 +3073,10 @@ class ChatApp:
         except Exception:
             pass
 
-    def _receive_dm(self, from_cid, name, text, mid=None):
+    def _receive_dm(self, from_cid, name, text, mid=None, reply=None):
         s = self._ensure_dm_session(from_cid, name)
         s["online"] = True
-        self._append_message(s["key"], name, text, False, mid=mid)
+        self._append_message(s["key"], name, text, False, mid=mid, reply=reply)
         self._schedule_session_list()
 
     def _receive_edit(self, room, mid, who, text):
@@ -3189,6 +3210,35 @@ class ChatApp:
             self._render_feed()
         else:
             self._set_status("撤回失败", "err")
+
+    def _start_reply(self, name, text):
+        """进入引用回复状态：显示回复栏并聚焦输入框。"""
+        self._reply_to = {"name": str(name or "")[:20],
+                          "text": str(text or "").replace("\n", " ")[:60]}
+        for w in self.reply_bar.winfo_children():
+            w.destroy()
+        ctk.CTkLabel(self.reply_bar, text=f"↩ 回复 {self._reply_to['name']}：{self._reply_to['text']}",
+                     text_color=C("warn_text"), font=(FONT, 10), anchor="w",
+                     justify="left", wraplength=480).pack(side="left", padx=10, pady=6)
+        ctk.CTkButton(self.reply_bar, text="✕", width=24, height=24, corner_radius=8,
+                      fg_color="transparent", text_color=C("warn_text"),
+                      hover_color=C("input_hover"), font=(FONT, 11),
+                      command=self._cancel_reply).pack(side="right", padx=8)
+        try:
+            self.reply_bar.pack(fill="x", padx=8, pady=(4, 0), before=self._ibar)
+        except Exception:
+            self.reply_bar.pack(fill="x", padx=8, pady=(4, 0))
+        try:
+            self.input_box.focus_set()
+        except Exception:
+            pass
+
+    def _cancel_reply(self):
+        self._reply_to = None
+        try:
+            self.reply_bar.pack_forget()
+        except Exception:
+            pass
 
     def _ack_reads(self, s):
         """对会话里已显示的他人消息发送已读回执（每条只发一次）。"""
@@ -3405,13 +3455,19 @@ class ChatApp:
 
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
                      read_by=None, delivered_by=None, mid=None, recalled=False,
-                     recalled_by=None, edited=False):
+                     recalled_by=None, edited=False, reply=None):
         if recalled:
             label = "（已撤回）" if mine else f"（{recalled_by or '对方'} 撤回了一条消息）"
             self._render_system_line(label)
             return
         tstr = _fmt_time(ts) if ts else ""
         bubble = self._message_row(name, mine, show_head)
+        if reply:
+            rname = str(reply.get("name", ""))[:20]
+            rtext = str(reply.get("text", "")).replace("\n", " ")[:40]
+            ctk.CTkLabel(bubble, text=f"↩ {rname}：{rtext}", text_color=C("text_mute"),
+                         font=(FONT, 9), anchor="w", justify="left",
+                         wraplength=440).pack(anchor="w", padx=12, pady=(6, 0))
         if show_head:
             head = ctk.CTkFrame(bubble, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(6, 0))
@@ -3424,7 +3480,7 @@ class ChatApp:
                             text_color=(C("mine_text") if mine else C("other_text")),
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
-        body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid))
+        body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
         if mine and read_by:
             names = "、".join(read_by[:5])
             if len(read_by) > 5:
@@ -3513,11 +3569,12 @@ class ChatApp:
         except Exception:
             pass
 
-    def _message_menu(self, event, text, file_path=None, mine=False, mid=None):
-        """消息右键菜单：复制 / 撤回 / （文件消息）打开位置。"""
+    def _message_menu(self, event, text, file_path=None, mine=False, mid=None, name=""):
+        """消息右键菜单：复制 / 引用回复 / 编辑 / 撤回 / （文件消息）打开位置。"""
         try:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
+            menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text))
             if mine and mid:
                 menu.add_command(label="编辑", command=lambda: self._edit_message_dialog(mid, text))
                 menu.add_command(label="撤回", command=lambda: self._do_recall(mid))
@@ -3631,7 +3688,7 @@ class ChatApp:
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),
                                  delivered_by=m.get("delivered_by"), mid=m.get("mid"),
                                  recalled=m.get("recalled"), recalled_by=m.get("recalled_by"),
-                                 edited=m.get("edited"))
+                                 edited=m.get("edited"), reply=m.get("reply"))
         self._suppress_auto_scroll = False
         if self._search_query:
             self._scroll_top()

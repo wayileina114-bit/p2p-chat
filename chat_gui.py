@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1367,6 +1367,8 @@ class ChatApp:
         self._pending_offers = {}
         self._hint_active = True
         self._thumb_cache = {}      # 图片缩略图缓存：path -> CTkImage
+        self._my_avatar_ctk = None  # 自己的圆形头像缓存
+        self._last_title = ""       # 窗口标题缓存（避免频繁重设）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1643,6 +1645,7 @@ class ChatApp:
             w.destroy()
         self._images = []
         self._thumb_cache = {}
+        self._my_avatar_ctk = None
         self.root.configure(fg_color=C("app_bg"))
         self._build_ui()
         self._build_menu()
@@ -1705,6 +1708,7 @@ class ChatApp:
         saved = _copy_avatar(path)
         if saved:
             self._avatar = saved
+            self._my_avatar_ctk = None
             self._profile_name = self.nick_var.get().strip() or "未命名"
             _save_profile(self._profile_name, self._avatar)
             self._render_top_avatar()
@@ -2524,7 +2528,7 @@ class ChatApp:
         self._update_window_title()
 
     def _update_window_title(self):
-        # 窗口标题实时反映连接状态 + 未读消息数
+        # 窗口标题实时反映连接状态 + 未读消息数（无变化时不重复设置，避免频繁重绘）
         try:
             if self.backend and self.backend.online:
                 base = f"P2P 聊天 · 已连接 · {len(self._peers)} 人在线"
@@ -2533,24 +2537,39 @@ class ChatApp:
             unread = sum(s.get("unread", 0) for s in self._sessions.values())
             if unread:
                 base = f"● {base}  [{unread} 条未读]"
-            self.root.title(base)
+            if base != self._last_title:
+                self._last_title = base
+                self.root.title(base)
         except Exception:
             pass
 
-    def _scroll_bottom(self):
+    def _refresh_scrollregion(self):
+        """强制刷新 canvas 的 scrollregion（新内容 pack 后布局是惰性更新的）。"""
         try:
-            self.feed._parent_canvas.update_idletasks()
-            self.feed._parent_canvas.yview_moveto(1.0)
+            canvas = self.feed._parent_canvas
+            canvas.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            return canvas
         except Exception:
-            pass
+            return None
+
+    def _scroll_bottom(self):
+        canvas = self._refresh_scrollregion()
+        if canvas is not None:
+            try:
+                canvas.yview_moveto(1.0)
+            except Exception:
+                pass
 
     def _maybe_scroll_bottom(self):
         """新内容到达时，仅当用户已在底部附近才自动滚动，避免打断向上翻阅历史。"""
+        canvas = self._refresh_scrollregion()
+        if canvas is None:
+            return
         try:
-            self.feed._parent_canvas.update_idletasks()
-            _top, bottom = self.feed._parent_canvas.yview()
+            _top, bottom = canvas.yview()
             if float(bottom) >= 0.98:
-                self.feed._parent_canvas.yview_moveto(1.0)
+                canvas.yview_moveto(1.0)
         except Exception:
             self._scroll_bottom()
 
@@ -2618,10 +2637,13 @@ class ChatApp:
         return (cur.get("ts") or 0) - (prev.get("ts") or 0) >= ChatApp.GROUP_GAP
 
     def _avatar_label(self, parent, name, mine, size=34):
-        """聊天消息头像：自己的用真实头像（圆形），对方用彩色首字母（Discord 风格）。"""
+        """聊天消息头像：自己的用真实头像（圆形，缓存避免每帧重复解码），对方用彩色首字母。"""
         img = None
         if mine and self._avatar:
-            img = _circular_ctk_image(self._avatar, size)
+            img = self._my_avatar_ctk
+            if img is None:
+                img = _circular_ctk_image(self._avatar, size)
+                self._my_avatar_ctk = img
         if img is not None:
             self._images.append(img)
             return ctk.CTkLabel(parent, image=img, text="", width=size, height=size,
@@ -3068,7 +3090,7 @@ class VersionManagerDialog:
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("版本管理 / 更新")
-        top.geometry("560x580")
+        top.geometry("480x540")
         top.resizable(False, False)
         top.transient(master)
         top.configure(fg_color=C("app_bg"))
@@ -3078,20 +3100,16 @@ class VersionManagerDialog:
         except Exception:
             pass
 
-        ctk.CTkLabel(top, text="版本管理", font=(FONT, 16, "bold"),
-                     text_color=C("text")).pack(pady=(16, 2))
+        ctk.CTkLabel(top, text="版本管理", font=(FONT, 15, "bold"),
+                     text_color=C("text")).pack(pady=(14, 2))
         ctk.CTkLabel(top, text=f"当前版本：v{self.current}", font=(FONT, 11),
                      text_color=C("text_mute")).pack()
 
-        self.var = ctk.StringVar(value=self._label(self._selected))
-        tags = [self._label(v["tag"]) for v in self.versions]
-        self.combo = ctk.CTkComboBox(top, variable=self.var, values=tags, width=260, height=30,
-                                     corner_radius=8, fg_color=C("input_bg"), text_color=C("text"),
-                                     button_color=C("input_hover"), button_hover_color=C("input_hover"),
-                                     dropdown_fg_color=C("panel"), dropdown_text_color=C("text"),
-                                     font=(FONT, 12), dropdown_font=(FONT, 12),
-                                     command=self._on_select)
-        self.combo.pack(pady=(8, 6))
+        # 版本列表（紧凑、支持鼠标滚轮滚动）
+        self.list_frame = ctk.CTkScrollableFrame(top, width=320, height=150, fg_color="transparent")
+        self.list_frame.pack(fill="x", padx=18, pady=(8, 4))
+        self._btn_by_tag = {}
+        self._build_list()
 
         self.body_box = ctk.CTkTextbox(top, corner_radius=10, fg_color=C("panel_2"),
                                        text_color=C("text_2"), font=(FONT, 11), wrap="word")
@@ -3107,12 +3125,25 @@ class VersionManagerDialog:
                       fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                       font=(FONT, 12), command=top.destroy).pack(side="right")
 
-    def _label(self, tag):
-        return "v" + str(tag) + ("（当前）" if str(tag) == self.current else "")
+    def _build_list(self):
+        for v in self.versions:
+            tag = v["tag"]
+            label = "v" + tag + ("（当前）" if tag == self.current else "")
+            sel = (tag == self._selected)
+            btn = ctk.CTkButton(self.list_frame, text=label, height=28, corner_radius=6,
+                                fg_color=(C("selected_bg") if sel else "transparent"),
+                                hover_color=C("hover"), text_color=C("text"),
+                                font=(FONT, 11, "bold" if sel else "normal"),
+                                anchor="w", command=lambda t=tag: self._select(t))
+            btn.pack(fill="x", pady=1)
+            self._btn_by_tag[tag] = btn
 
-    def _on_select(self, value):
-        tag = value.replace("（当前）", "").lstrip("vV").strip()
+    def _select(self, tag):
         self._selected = tag
+        for t, btn in self._btn_by_tag.items():
+            sel = (t == tag)
+            btn.configure(fg_color=(C("selected_bg") if sel else "transparent"),
+                          font=(FONT, 11, "bold" if sel else "normal"))
         self._render_body()
 
     def _sel_obj(self):

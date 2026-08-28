@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -78,6 +78,8 @@ DEFAULT_PORT = 1883
 CHUNK_SIZE = 256 * 1024          # 每个分片 256KB（二进制直传，无 base64 开销）
 MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
+RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
+PRESENCE_TTL = 120.0             # 在线名单过期时间（秒），超时视为下线（兜底 will 丢失）
 
 FONT = "Microsoft YaHei UI"
 HINT = "输入文字，回车发送；也可直接把图片 / 文件拖到这里"
@@ -693,10 +695,36 @@ class MqttBackend:
                 data = {"name": "匿名"}
             name = str(data.get("name", "匿名"))
             rooms = data.get("rooms") or []
-            self.presence[cid] = {"name": name, "rooms": [str(r) for r in rooms]}
+            try:
+                ts = float(data.get("ts") or time.time())
+            except Exception:
+                ts = time.time()
+            self.presence[cid] = {"name": name, "rooms": [str(r) for r in rooms], "ts": ts}
         else:
             self.presence.pop(cid, None)
         self._fire_peers()
+
+    def _prune_presence(self):
+        """剔除超过 PRESENCE_TTL 未更新的在线条目（兜底 will 消息丢失导致的幽灵在线）。"""
+        now = time.time()
+        stale = [cid for cid, p in self.presence.items()
+                 if now - float(p.get("ts") or now) > PRESENCE_TTL]
+        if not stale:
+            return
+        for cid in stale:
+            self.presence.pop(cid, None)
+        self._fire_peers()
+
+    def _prune_loop(self):
+        """后台周期性清理过期在线条目（每 30 秒一次）。"""
+        while self.running:
+            time.sleep(30)
+            if not self.running:
+                break
+            try:
+                self._prune_presence()
+            except Exception:
+                pass
 
     def _handle_dm(self, topic, raw):
         target = topic.rsplit("/", 1)[-1]
@@ -733,6 +761,12 @@ class MqttBackend:
         tid = data.get("id")
         size = int(data.get("size", 0))
         if not tid or size < 0 or size > MAX_FILE:
+            return
+        try:
+            total = int(data.get("total", 0))
+        except Exception:
+            total = 0
+        if total != max(1, math.ceil(size / CHUNK_SIZE)):
             return
         data["room"] = room
         self._offers[tid] = data
@@ -773,6 +807,8 @@ class MqttBackend:
         r = self._receivers.get(tid)
         if r is None:
             return
+        if idx >= r["total"]:
+            return
         if idx in r["chunks"]:
             return
         r["chunks"][idx] = raw[17:]
@@ -805,6 +841,15 @@ class MqttBackend:
             "mime": r["mime"], "sname": r.get("sname", "对方"),
         })
 
+    def _watch_recv(self, tid):
+        """接收方看门狗：超过 RECV_TIMEOUT 仍未收齐数据则清理残留，避免内存泄漏。"""
+        time.sleep(RECV_TIMEOUT)
+        r = self._receivers.get(tid)
+        if r is None:
+            return
+        self._receivers.pop(tid, None)
+        self._fire_file(r["room"], "error", {"name": r["name"], "msg": "接收超时，传输中断"})
+
     # --------------------------- 对外方法 ---------------------------
 
     def start(self):
@@ -814,6 +859,7 @@ class MqttBackend:
         self.running = True
         self._client = self._build()
         self._client.loop_start()
+        threading.Thread(target=self._prune_loop, daemon=True).start()
         try:
             self._client.connect_async(self.broker, self.port, keepalive=30)
         except Exception as e:
@@ -827,6 +873,7 @@ class MqttBackend:
         self._pending.clear()
         self._offers.clear()
         self._receivers.clear()
+        self.presence.clear()
         client = self._client
         self._client = None
         self.online = False
@@ -969,6 +1016,7 @@ class MqttBackend:
             "total": data["total"], "md5": data["md5"],
             "chunks": {}, "got": 0, "sname": data.get("sname", "对方"), "room": room,
         }
+        threading.Thread(target=self._watch_recv, args=(tid,), daemon=True).start()
         self._publish_ctrl(room, {"kind": "accept", "id": tid, "from": self.cid, "to": data["from"]})
         self._fire_file(room, "accepting", {"name": data["name"], "size": data["size"]})
 

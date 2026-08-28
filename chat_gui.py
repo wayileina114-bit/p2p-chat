@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.4.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.5.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -355,6 +355,24 @@ def _save_dm_history(cid, name, msgs):
     try:
         with open(_dm_path(cid), "w", encoding="utf-8") as f:
             json.dump({"name": name, "messages": msgs}, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def _delete_group_history(room):
+    try:
+        p = _group_path(room)
+        if os.path.isfile(p):
+            os.remove(p)
+    except Exception:
+        pass
+
+
+def _delete_dm_history(cid):
+    try:
+        p = _dm_path(cid)
+        if os.path.isfile(p):
+            os.remove(p)
     except Exception:
         pass
 
@@ -1061,6 +1079,7 @@ class ChatApp:
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
+            help_menu.add_command(label="清空当前会话记录", command=self._clear_current_history)
             help_menu.add_command(label="打开收件文件夹", command=self._open_downloads)
             menubar.add_cascade(label="帮助", menu=help_menu)
             self.root.config(menu=menubar)
@@ -1328,6 +1347,7 @@ class ChatApp:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 10))
         for w in (row, lbl):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
+            w.bind("<Button-3>", lambda e, s=s: self._dm_context_menu(e, s))
 
     def _add_member_item(self, cid, name):
         row = ctk.CTkFrame(self.session_frame, corner_radius=10, fg_color="transparent")
@@ -1436,6 +1456,53 @@ class ChatApp:
                 self._update_chat_title()
                 self._render_feed()
         self._apply_session_list()
+
+    def _clear_current_history(self):
+        s = self._sessions.get(self._current)
+        if s is None:
+            messagebox.showinfo("提示", "当前没有选中的会话。")
+            return
+        if not messagebox.askyesno("清空记录",
+                                   "确定清空当前会话的全部聊天记录吗？此操作不可撤销。"):
+            return
+        s["messages"] = []
+        s["unread"] = 0
+        if s["kind"] == "group":
+            _delete_group_history(s["room"])
+        else:
+            _delete_dm_history(s["cid"])
+        self._render_feed()
+        self._apply_session_list()
+        self._set_status("已清空当前会话记录", "#1a7f37")
+
+    def _delete_dm_session(self, key):
+        s = self._sessions.get(key)
+        if s is None or s["kind"] != "dm":
+            return
+        if not messagebox.askyesno("删除会话",
+                                   f"确定删除与「{s['name']}」的私聊会话及全部聊天记录吗？"):
+            return
+        _delete_dm_history(s["cid"])
+        self._sessions.pop(key, None)
+        if self._current == key:
+            if self._rooms:
+                self._switch_to(self._group_key(self._rooms[0]))
+            else:
+                self._current = None
+                self._update_chat_title()
+                self._render_feed()
+        self._apply_session_list()
+
+    def _dm_context_menu(self, event, s):
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="删除会话", command=lambda: self._delete_dm_session(s["key"]))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
     def _on_nick_changed(self):
         if self.backend and self.backend.running:

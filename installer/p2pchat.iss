@@ -2,7 +2,7 @@
 ; 把 onedir 打包好的 dist\P2PChat 整个文件夹装进 Program Files
 
 #define MyAppName "P2P聊天"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.5.0"
 #define MyAppPublisher "P2PChat"
 #define MyAppExeName "P2PChat.exe"
 

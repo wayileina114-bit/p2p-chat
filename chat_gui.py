@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1007,6 +1007,8 @@ class MqttBackend:
         self._connected_once = False
         self._client = None
         self._aux_clients = []       # 辅助公共 broker 客户端（多通道文本/控制并行，加速）
+        self._aux_online = set()     # 当前在线的辅助客户端（主通道断开时自动接棒，保持在线）
+        self._outbox = []            # 发送失败待补发的消息：[(topic, payload, qos)]，通道恢复后自动重发
         self.rooms = {}              # 房间名 -> roomid
         self._room_by_id = {}        # roomid -> 房间名
         self.presence = {}           # cid -> {"name":.., "rooms":[..]}（全局在线名单）
@@ -1102,6 +1104,15 @@ class MqttBackend:
         ok = (not rc.is_failure) if hasattr(rc, "is_failure") else (rc == 0)
         if not ok:
             return
+        try:
+            self._aux_online.add(id(client))
+        except Exception:
+            pass
+        # 主通道未在线但辅助通道已就绪：辅助接棒，保持整体在线（断线智能切换）
+        if not self.online and self.running:
+            self.online = True
+            self._fire_status(True, "主通道未就绪，已切换辅助通道保持在线")
+        self._flush_outbox()  # 任一通道恢复即补发失败消息
         self._aux_subscribed = set()
         client.subscribe(f"{self.NS}/presence/+", qos=1)
         self._aux_subscribed.add(f"{self.NS}/presence/+")
@@ -1111,8 +1122,15 @@ class MqttBackend:
             self._aux_subscribe_room(client, room)
 
     def _on_aux_disconnect(self, client, userdata, *args):
-        # 辅助通道断开不改变整体在线状态（主通道仍在线）；自动重连即可
-        pass
+        try:
+            self._aux_online.discard(id(client))
+        except Exception:
+            pass
+        # 主通道断开且最后一个辅助也断开：整体掉线（等待任一通道重连）
+        if self.online and not self._aux_online and self._client is None:
+            self.online = False
+            if self.running:
+                self._fire_status(False, "全部通道断开，正在重连…")
 
     def _aux_subscribe_room(self, client, room):
         topic = f"{self._topic_room(room)}/msg"
@@ -1121,8 +1139,13 @@ class MqttBackend:
         client.subscribe(topic, qos=1)
         self._aux_subscribed.add(topic)
 
-    def _publish_all(self, topic, payload, qos=1, retain=False):
-        """多通道发布：主 broker + 所有在线辅助 broker（文本/控制类消息）。"""
+    def _publish_all(self, topic, payload, qos=1, retain=False, from_outbox=False):
+        """多通道发布：主 broker + 所有在线辅助 broker（文本/控制类消息）。
+
+        返回是否至少有一个通道成功投递（paho 为异步投递，此处以“已入队到在线
+        客户端”为成功；任一通道在线即视为可发送，主通道断开时由辅助通道接棒）。
+        发送失败时自动加入补发队列（_outbox），任一通道恢复后自动重发。
+        """
         sent = False
         try:
             if self._client is not None:
@@ -1132,11 +1155,46 @@ class MqttBackend:
             pass
         for c in list(self._aux_clients):
             try:
-                if c is not None:
+                if c is not None and id(c) in self._aux_online:
                     c.publish(topic, payload, qos=qos)
+                    sent = True
+            except Exception:
+                pass
+        if not sent and not from_outbox:
+            try:
+                self._outbox.append((topic, payload, qos))
+                if len(self._outbox) > 200:
+                    self._outbox.pop(0)
             except Exception:
                 pass
         return sent
+
+    def _flush_outbox(self):
+        """通道恢复后自动补发之前失败的消息（按序重发，成功即移除）。"""
+        if not self._outbox or not self._any_online():
+            return
+        kept = []
+        for topic, payload, qos in self._outbox:
+            ok = self._publish_all(topic, payload, qos=qos, from_outbox=True)
+            if not ok:
+                kept.append((topic, payload, qos))
+        self._outbox = kept
+
+    def _any_online(self):
+        """是否有任一通道在线（主或辅助）。"""
+        if self._client is not None and self.online:
+            return True
+        if self._aux_online:
+            return True
+        return self.online
+
+    def _any_online(self):
+        """是否有任一通道在线（主或辅助）。"""
+        if self._client is not None and self.online:
+            return True
+        if self._aux_online:
+            return True
+        return self.online
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         ok = (not rc.is_failure) if hasattr(rc, "is_failure") else (rc == 0)
@@ -1155,6 +1213,7 @@ class MqttBackend:
             for room in list(self.rooms.keys()):
                 self._subscribe_room(room)
             self._publish_presence()
+            self._flush_outbox()  # 通道恢复，自动补发之前失败的消息
             msg = "已重新连接" if self._connected_once else "已连接"
             self._connected_once = True
             self._fire_status(True, msg)
@@ -1163,6 +1222,10 @@ class MqttBackend:
             self._fire_status(False, f"连接失败（{rc}）")
 
     def _on_disconnect(self, client, userdata, *args):
+        # 主通道断开：若仍有辅助通道在线，整体保持在线（智能切换，不打断聊天）
+        if self._aux_online and self.running:
+            self._fire_status(False, "主通道断开，已自动切换辅助通道")
+            return
         self.online = False
         if self.running:
             self._fire_status(False, "连接断开，正在重连…")
@@ -1327,6 +1390,10 @@ class MqttBackend:
             try:
                 if self.online and self._client is not None:
                     self._publish_presence()
+            except Exception:
+                pass
+            try:
+                self._flush_outbox()
             except Exception:
                 pass
 
@@ -1655,6 +1722,12 @@ class MqttBackend:
         if self.online and self._client:
             self._subscribe_room(room)
             self._publish_presence()
+        for c in list(self._aux_clients):
+            try:
+                if c is not None and id(c) in self._aux_online:
+                    self._aux_subscribe_room(c, room)
+            except Exception:
+                pass
         return True
 
     def remove_room(self, room):
@@ -1671,6 +1744,17 @@ class MqttBackend:
                 pass
             self._subscribed.discard(topic)
             self._publish_presence()
+        for c in list(self._aux_clients):
+            try:
+                if c is not None:
+                    t = f"{self._topic_room(room)}/msg"
+                    try:
+                        c.unsubscribe(t)
+                    except Exception:
+                        pass
+                    self._aux_subscribed.discard(t)
+            except Exception:
+                pass
         return True
 
     def _subscribe_room(self, room):
@@ -1706,7 +1790,7 @@ class MqttBackend:
 
     def send_text(self, room, text, reply=None):
         text = (text or "").strip()
-        if not text or room not in self.rooms or not self.online or self._client is None:
+        if not text or room not in self.rooms or not self._any_online():
             return False
         mid = uuid.uuid4().hex[:12]
         obj = {"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}
@@ -1728,7 +1812,7 @@ class MqttBackend:
 
     def send_dm(self, target_cid, text, reply=None):
         text = (text or "").strip()
-        if not text or not self.online or self._client is None or not target_cid:
+        if not text or not self._any_online() or not target_cid:
             return False
         mid = uuid.uuid4().hex[:12]
         obj = {"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}
@@ -1747,7 +1831,7 @@ class MqttBackend:
 
     def send_recall(self, target, mid, is_dm=False):
         """撤回一条消息：向房间/私聊广播撤回指令。"""
-        if not mid or not self.online or self._client is None:
+        if not mid or not self._any_online():
             return False
         payload = json.dumps({"kind": "recall", "mid": mid, "cid": self.cid}, ensure_ascii=False)
         if is_dm:
@@ -1758,7 +1842,7 @@ class MqttBackend:
 
     def send_read(self, target, mid, is_dm=False):
         """发送已读回执：告知对方我已看到该消息。"""
-        if not mid or not self.online or self._client is None:
+        if not mid or not self._any_online():
             return False
         payload = json.dumps({"kind": "read", "mid": mid, "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
@@ -1769,7 +1853,7 @@ class MqttBackend:
 
     def send_typing(self, target, is_dm=False):
         """广播“正在输入”状态（qos=0，瞬时、不持久化）。"""
-        if not self.online or self._client is None or not target:
+        if not self._any_online() or not target:
             return False
         payload = json.dumps({"kind": "typing", "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
@@ -1780,7 +1864,7 @@ class MqttBackend:
 
     def send_delivered(self, target, mid, is_dm=False):
         """发送“已送达”回执：我已收到该消息（尚未打开也算送达）。"""
-        if not mid or not self.online or self._client is None:
+        if not mid or not self._any_online():
             return False
         payload = json.dumps({"kind": "delivered", "mid": mid, "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
@@ -1801,7 +1885,7 @@ class MqttBackend:
 
     def send_edit(self, target, mid, new_text, is_dm=False):
         """编辑一条已发送的消息：向房间/私聊广播修改内容。"""
-        if not mid or not new_text or not self.online or self._client is None:
+        if not mid or not new_text or not self._any_online():
             return False
         payload = json.dumps({"kind": "edit", "mid": mid, "cid": self.cid,
                               "text": str(new_text)[:MAX_TEXT]}, ensure_ascii=False)
@@ -1813,7 +1897,7 @@ class MqttBackend:
 
     def send_reaction(self, target, mid, emoji, is_dm=False):
         """对一条消息做表情回应（再次发送同一表情则取消）。"""
-        if not mid or not emoji or not self.online or self._client is None:
+        if not mid or not emoji or not self._any_online():
             return False
         payload = json.dumps({"kind": "reaction", "mid": mid, "emoji": str(emoji),
                               "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
@@ -6371,6 +6455,27 @@ def _report_callback_exception(etype, value, tb):
     _notify_crash(p)
 
 
+def _resource_path(rel):
+    """定位程序资源文件（图标等）：打包后从 PyInstaller 临时目录取，开发时取项目根目录。"""
+    try:
+        base = sys._MEIPASS
+    except Exception:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, rel)
+
+
+def _set_window_icon(root):
+    """设置运行时窗口图标（标题栏 / 任务栏），与安装程序 / exe 图标一致。"""
+    try:
+        ico = _resource_path("P2PChat.ico")
+        if os.path.isfile(ico):
+            root.iconbitmap(ico)
+            return True
+    except Exception:
+        pass
+    return False
+
+
 def main():
     global _DND_READY
     _patch_focus_guards()
@@ -6383,6 +6488,7 @@ def main():
     ctk.set_default_color_theme("blue")
     try:
         root = ctk.CTk()
+        _set_window_icon(root)
         if _HAS_DND:
             try:
                 TkinterDnD.require(root)

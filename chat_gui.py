@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2264,6 +2264,10 @@ class ChatApp:
     def _switch_to(self, key):
         if key is None or key not in self._sessions:
             return
+        # 记录离开旧会话的时间，用于回来后画“新消息”分隔线
+        old = self._sessions.get(self._current)
+        if old is not None and old.get("key") != key:
+            old["last_seen_ts"] = time.time()
         self._current = key
         self._history_expanded = False
         if self._search_query:
@@ -3957,6 +3961,8 @@ class ChatApp:
             lbl.bind("<Button-1>", lambda e: self._expand_history())
             msgs = msgs[-self.RENDER_MAX:]
         last_day = None
+        last_seen = s.get("last_seen_ts")
+        shown_new = False
         self._suppress_auto_scroll = True  # 全量渲染：逐条 auto-scroll 交给末尾一次 _scroll_bottom
         for pm in [m for m in msgs if m.get("pinned") and not m.get("recalled")]:
             self._render_pinned_card(pm)
@@ -3964,6 +3970,10 @@ class ChatApp:
             if m.get("pinned"):
                 continue
             ts = m.get("ts")
+            if last_seen and ts and float(ts) > last_seen and not shown_new and not m.get("mine"):
+                ctk.CTkLabel(self.feed, text="── 新消息 ──", text_color=C("accent"),
+                             font=(FONT, 10, "bold")).pack(pady=(8, 2))
+                shown_new = True
             dlabel = _day_label(ts) if ts else ""
             day_break = bool(dlabel and dlabel != last_day)
             if day_break:

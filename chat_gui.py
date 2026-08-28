@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1059,6 +1059,7 @@ class MqttBackend:
             return
         data["room"] = room
         self._offers[tid] = data
+        self._auto_delivered(room, tid, str(room).startswith(self.DM_FILE_PREFIX))
         self._fire_file(room, "offer", {
             "tid": tid, "name": data.get("name", "file"), "size": size,
             "mime": data.get("mime", ""), "sname": data.get("sname", "匿名"),
@@ -1431,7 +1432,7 @@ class MqttBackend:
                 offer["thumb"] = thumb
         self._publish_ctrl(room, offer)
         threading.Thread(target=self._watch_send, args=(tid,), daemon=True).start()
-        self._fire_file(room, "waiting", {"name": name, "size": size})
+        self._fire_file(room, "waiting", {"name": name, "size": size, "tid": tid, "path": path, "mime": mime})
         return True
 
     def accept_file(self, tid):
@@ -3706,7 +3707,8 @@ class ChatApp:
                 f.write(base64.b64decode(info["thumb"]))
             sname = info.get("sname", "对方")
             self._append_message(key, sname, f"🖼 图片：{info.get('name', '')}", False,
-                                 img_path=tp, preview_tid=info.get("tid"))
+                                 img_path=tp, preview_tid=info.get("tid"),
+                                 mid=info.get("tid"))
         except Exception:
             self._add_file_offer_card(key, room, info)
             return
@@ -3743,7 +3745,11 @@ class ChatApp:
         size = info.get("size", 0)
         my = self.nick_var.get().strip() or "未命名"
         if event == "waiting":
-            self._show_system(f"📤 已发送请求，等待对方接收：{name}（{fmt_size(size)}）", key)
+            if is_image(mime) and info.get("path") and os.path.isfile(info["path"]):
+                self._append_message(key, my, f"🖼 图片：{name}", True,
+                                     img_path=info["path"], mid=info.get("tid"))
+            else:
+                self._show_system(f"📤 已发送请求，等待对方接收：{name}（{fmt_size(size)}）", key)
         elif event == "accepted":
             self._show_system(f"✅ 对方已接受，开始发送：{name}", key)
         elif event == "accepting":
@@ -3751,8 +3757,8 @@ class ChatApp:
         elif event == "progress":
             self._set_status(f"传输中 {info.get('percent', 0)}% · {name}", "accent")
         elif event == "sent":
-            if is_image(mime) and info.get("path"):
-                self._append_message(key, my, f"🖼 图片：{name}", True, img_path=info["path"])
+            if is_image(mime):
+                self._set_status(f"✅ 图片已发送：{name}", "ok")
             else:
                 self._append_message(key, my, f"📎 已发送文件：{name}（{fmt_size(size)}）", True,
                                      file_path=info.get("path", ""))
@@ -3768,7 +3774,8 @@ class ChatApp:
             path = info.get("path", "")
             if is_image(mime):
                 if not self._replace_preview(key, info.get("tid"), path):
-                    self._append_message(key, sname, f"🖼 图片：{name}", False, img_path=path)
+                    self._append_message(key, sname, f"🖼 图片：{name}", False,
+                                         img_path=path, mid=info.get("tid"))
             else:
                 self._append_message(key, sname, f"📎 已收到文件：{name}（{fmt_size(size)}）", False,
                                      file_path=path)

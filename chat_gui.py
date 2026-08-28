@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -597,6 +597,8 @@ def _norm_msg(m):
         msg["mid"] = str(m["mid"])
     if m.get("read_by"):
         msg["read_by"] = list(m["read_by"])
+    if m.get("delivered_by"):
+        msg["delivered_by"] = list(m["delivered_by"])
     if m.get("recalled"):
         msg["recalled"] = True
         if m.get("recalled_by"):
@@ -734,7 +736,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 on_recall=None, on_read=None, on_typing=None, passphrase=""):
+                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -749,6 +751,8 @@ class MqttBackend:
         self.on_recall = on_recall
         self.on_read = on_read
         self.on_typing = on_typing
+        self.on_delivered = on_delivered
+        self._delivered_acked = set()  # 已自动回过“已送达”的消息 mid
 
         self.online = False
         self.running = False
@@ -916,8 +920,12 @@ class MqttBackend:
         if data.get("kind") == "typing":
             self._fire_typing(room, str(data.get("name", "匿名"))[:60], str(data.get("cid", "")))
             return
+        if data.get("kind") == "delivered":
+            self._fire_delivered(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
+            return
         if data.get("cid") == self.cid:
             return
+        self._auto_delivered(room, str(data.get("mid", "")), False)
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
                         str(data.get("text", ""))[:MAX_TEXT], False, str(data.get("mid", "")))
 
@@ -998,8 +1006,12 @@ class MqttBackend:
         if data.get("kind") == "typing":
             self._fire_typing(self.DM_FILE_PREFIX + str(sender), str(data.get("name", "匿名"))[:60], str(sender))
             return
+        if data.get("kind") == "delivered":
+            self._fire_delivered(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("name", "匿名")))
+            return
         if not sender or sender == self.cid:
             return
+        self._auto_delivered(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), True)
         if self.on_dm:
             self.on_dm(sender, str(data.get("name", "匿名"))[:60],
                        str(data.get("text", ""))[:MAX_TEXT], str(data.get("mid", "")))
@@ -1325,6 +1337,27 @@ class MqttBackend:
             self._client.publish(self._topic_room(target) + "/msg", payload, qos=0)
         return True
 
+    def send_delivered(self, target, mid, is_dm=False):
+        """发送“已送达”回执：我已收到该消息（尚未打开也算送达）。"""
+        if not mid or not self.online or self._client is None:
+            return False
+        payload = json.dumps({"kind": "delivered", "mid": mid, "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
+        if is_dm:
+            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+        else:
+            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+        return True
+
+    def _auto_delivered(self, room, mid, is_dm):
+        """收到对方消息时自动回一次“已送达”（每条 mid 只回一次）。"""
+        if not mid or mid in self._delivered_acked:
+            return
+        self._delivered_acked.add(mid)
+        target = room
+        if is_dm:
+            target = str(room)[1:] if str(room).startswith(self.DM_FILE_PREFIX) else room
+        self.send_delivered(target, mid, is_dm)
+
     def send_file(self, room, path):
         if room not in self.rooms or not self.online or self._client is None:
             return False
@@ -1475,6 +1508,10 @@ class MqttBackend:
     def _fire_typing(self, room, name, cid):
         if self.on_typing:
             self.on_typing(room, name, cid)
+
+    def _fire_delivered(self, room, mid, cid, name):
+        if self.on_delivered:
+            self.on_delivered(room, mid, cid, name)
 
     def _fire_peers(self):
         if self.on_peers:
@@ -2612,6 +2649,7 @@ class ChatApp:
             on_read=self._cb_read,
             on_recall=self._cb_recall,
             on_typing=self._cb_typing,
+            on_delivered=self._cb_delivered,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -2879,6 +2917,9 @@ class ChatApp:
     def _cb_typing(self, room, name, cid):
         self.root.after(0, lambda: self._receive_typing(room, name, cid))
 
+    def _cb_delivered(self, room, mid, cid, name):
+        self.root.after(0, lambda: self._receive_delivered(room, mid, cid, name))
+
     def _receive_typing(self, room, name, cid):
         """收到“正在输入”状态：当前会话标题临时显示，2.5 秒后恢复。"""
         if cid == self.cid:
@@ -2935,6 +2976,27 @@ class ChatApp:
         s["online"] = True
         self._append_message(s["key"], name, text, False, mid=mid)
         self._schedule_session_list()
+
+    def _receive_delivered(self, room, mid, cid, name):
+        """收到“已送达”回执：给对应消息标记谁已送达（未读前显示已送达）。"""
+        if not mid:
+            return
+        if str(room).startswith("@"):
+            key = self._dm_key(str(room)[1:])
+        else:
+            key = self._group_key(room)
+        s = self._sessions.get(key)
+        if s is None:
+            return
+        for m in s["messages"]:
+            if m.get("mid") == mid and m.get("mine"):
+                names = m.setdefault("delivered_by", [])
+                if name and name not in names:
+                    names.append(name)
+                self._save_session(s)
+                if key == self._current:
+                    self._render_feed()
+                return
 
     def _receive_read(self, room, mid, cid, name):
         """收到已读回执：给对应消息标记谁已读。"""
@@ -3214,7 +3276,8 @@ class ChatApp:
         return bubble
 
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
-                     read_by=None, mid=None, recalled=False, recalled_by=None):
+                     read_by=None, delivered_by=None, mid=None, recalled=False,
+                     recalled_by=None):
         if recalled:
             label = "（已撤回）" if mine else f"（{recalled_by or '对方'} 撤回了一条消息）"
             self._render_system_line(label)
@@ -3238,7 +3301,13 @@ class ChatApp:
             names = "、".join(read_by[:5])
             if len(read_by) > 5:
                 names += f" 等 {len(read_by)} 人"
-            ctk.CTkLabel(bubble, text=f"已读 {names}", text_color=C("text_mute"),
+            ctk.CTkLabel(bubble, text=f"已读 {names}", text_color=C("accent"),
+                         font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+        elif mine and delivered_by:
+            names = "、".join(delivered_by[:5])
+            if len(delivered_by) > 5:
+                names += f" 等 {len(delivered_by)} 人"
+            ctk.CTkLabel(bubble, text=f"已送达 {names}", text_color=C("text_mute"),
                          font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
         self._maybe_scroll_bottom()
         self._trim_feed()
@@ -3401,8 +3470,8 @@ class ChatApp:
             else:
                 self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),
-                                 mid=m.get("mid"), recalled=m.get("recalled"),
-                                 recalled_by=m.get("recalled_by"))
+                                 delivered_by=m.get("delivered_by"), mid=m.get("mid"),
+                                 recalled=m.get("recalled"), recalled_by=m.get("recalled_by"))
         self._suppress_auto_scroll = False
         if self._search_query:
             self._scroll_top()

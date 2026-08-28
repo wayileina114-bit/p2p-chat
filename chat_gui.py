@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.2.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.3.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -273,10 +273,35 @@ def _save_rooms(rooms):
 # --------------------------- 历史（按会话） ---------------------------
 
 
+def _fmt_time(ts):
+    """把时间戳格式化成 HH:MM，无效则返回空串。"""
+    try:
+        return time.strftime("%H:%M", time.localtime(float(ts)))
+    except Exception:
+        return ""
+
+
+def _day_label(ts):
+    """日期分隔标签：今天 / 昨天 / 具体日期。"""
+    try:
+        import datetime as _dt
+        d = _dt.datetime.fromtimestamp(float(ts))
+        today = _dt.date.today()
+        if d.date() == today:
+            return "今天"
+        if (today - d.date()).days == 1:
+            return "昨天"
+        return d.strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
 def _norm_msg(m):
     msg = {"name": str(m.get("name", "？")), "text": m.get("text", ""), "mine": bool(m.get("mine"))}
     if m.get("img_path"):
         msg["img_path"] = str(m["img_path"])
+    if m.get("ts"):
+        msg["ts"] = m["ts"]
     return msg
 
 
@@ -1316,7 +1341,7 @@ class ChatApp:
         s = self._sessions.get(key)
         if s is None:
             return
-        msg = {"name": name, "text": text, "mine": mine}
+        msg = {"name": name, "text": text, "mine": mine, "ts": time.time()}
         if img_path:
             msg["img_path"] = img_path
         s["messages"].append(msg)
@@ -1325,9 +1350,9 @@ class ChatApp:
         self._save_session(s)
         if key == self._current:
             if img_path and os.path.isfile(img_path):
-                self._add_image_bubble(name, img_path, mine)
+                self._add_image_bubble(name, img_path, mine, msg.get("ts"))
             else:
-                self._add_bubble(name, text, mine)
+                self._add_bubble(name, text, mine, msg.get("ts"))
         else:
             s["unread"] = s.get("unread", 0) + 1
             self._apply_session_list()
@@ -1609,21 +1634,30 @@ class ChatApp:
         self._scroll_bottom()
         self._trim_feed()
 
-    def _add_bubble(self, name, text, mine):
+    def _add_bubble(self, name, text, mine, ts=None):
+        tstr = _fmt_time(ts) if ts else ""
         bubble = ctk.CTkFrame(self.feed, corner_radius=14,
                               fg_color=("#d9e6ff" if mine else "#ffffff"))
         bubble.pack(anchor="e" if mine else "w", padx=12, pady=3)
-        ctk.CTkLabel(bubble, text=name, text_color="#8a8f99",
-                     font=(FONT, 10)).pack(anchor="w", padx=12, pady=(6, 0))
-        ctk.CTkLabel(bubble, text=text, wraplength=460, justify="left",
-                     text_color=("#142a52" if mine else "#1d1d1f"),
-                     font=(FONT, 12)).pack(anchor="w", padx=12, pady=(2, 8))
+        head = ctk.CTkFrame(bubble, fg_color="transparent")
+        head.pack(fill="x", padx=12, pady=(6, 0))
+        ctk.CTkLabel(head, text=name, text_color="#8a8f99",
+                     font=(FONT, 10)).pack(side="left")
+        if tstr:
+            ctk.CTkLabel(head, text=tstr, text_color="#b0b4bd",
+                         font=(FONT, 9)).pack(side="right")
+        body = ctk.CTkLabel(bubble, text=text, wraplength=460, justify="left",
+                            text_color=("#142a52" if mine else "#1d1d1f"),
+                            font=(FONT, 12))
+        body.pack(anchor="w", padx=12, pady=(2, 8))
+        body.bind("<Button-3>", lambda e, t=text: self._copy_text_menu(e, t))
         self._scroll_bottom()
         self._trim_feed()
 
-    def _add_image_bubble(self, name, path, mine):
+    def _add_image_bubble(self, name, path, mine, ts=None):
+        tstr = _fmt_time(ts) if ts else ""
         if not (_HAS_PIL and path and os.path.isfile(path)):
-            self._add_bubble(name, "🖼 一张图片", mine)
+            self._add_bubble(name, "🖼 一张图片", mine, ts)
             return
         try:
             from PIL import Image  # 惰性加载
@@ -1636,15 +1670,40 @@ class ChatApp:
             bubble = ctk.CTkFrame(self.feed, corner_radius=14,
                                   fg_color=("#d9e6ff" if mine else "#ffffff"))
             bubble.pack(anchor="e" if mine else "w", padx=12, pady=3)
-            ctk.CTkLabel(bubble, text=f"{name} · 图片", text_color="#8a8f99",
-                         font=(FONT, 10)).pack(anchor="w", padx=12, pady=(6, 2))
+            head = ctk.CTkFrame(bubble, fg_color="transparent")
+            head.pack(fill="x", padx=12, pady=(6, 2))
+            ctk.CTkLabel(head, text=f"{name} · 图片", text_color="#8a8f99",
+                         font=(FONT, 10)).pack(side="left")
+            if tstr:
+                ctk.CTkLabel(head, text=tstr, text_color="#b0b4bd",
+                             font=(FONT, 9)).pack(side="right")
             _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
             _img.pack(padx=6, pady=4)
             _img.bind("<Double-Button-1>", lambda e, p=path: self._open_image(p))
+            _img.bind("<Button-3>", lambda e, p=path: self._copy_text_menu(e, p))
             self._scroll_bottom()
             self._trim_feed()
         except Exception:
-            self._add_bubble(name, "🖼 一张图片（无法预览）", mine)
+            self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts)
+
+    def _copy_text_menu(self, event, text):
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def _copy_to_clipboard(self, text):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(str(text))
+            self._set_status("已复制到剪贴板", "#1a7f37")
+        except Exception:
+            pass
 
     def _show_system(self, text, target_key=None):
         target_key = target_key or self._current
@@ -1680,11 +1739,18 @@ class ChatApp:
                          text_color="#b0b4bd", font=(FONT, 10),
                          justify="center").pack(pady=4)
             msgs = msgs[-self.RENDER_MAX:]
+        last_day = None
         for m in msgs:
+            ts = m.get("ts")
+            dlabel = _day_label(ts) if ts else ""
+            if dlabel and dlabel != last_day:
+                ctk.CTkLabel(self.feed, text=f"── {dlabel} ──", text_color="#c0c4cd",
+                             font=(FONT, 10)).pack(pady=(8, 2))
+                last_day = dlabel
             if m.get("img_path") and os.path.isfile(m["img_path"]):
-                self._add_image_bubble(m["name"], m["img_path"], m["mine"])
+                self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts)
             else:
-                self._add_bubble(m["name"], m["text"], m["mine"])
+                self._add_bubble(m["name"], m["text"], m["mine"], ts)
         self._scroll_bottom()
 
     def _show_file_event(self, room, event, info):

@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.16"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.17"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -592,6 +592,7 @@ class MqttBackend:
 
         self.online = False
         self.running = False
+        self._connected_once = False
         self._client = None
         self.rooms = {}              # 房间名 -> roomid
         self._room_by_id = {}        # roomid -> 房间名
@@ -653,14 +654,19 @@ class MqttBackend:
             for room in list(self.rooms.keys()):
                 self._subscribe_room(room)
             self._publish_presence()
-            self._fire_status(True, "已连接")
+            msg = "已重新连接" if self._connected_once else "已连接"
+            self._connected_once = True
+            self._fire_status(True, msg)
         else:
             self.online = False
             self._fire_status(False, f"连接失败（{rc}）")
 
     def _on_disconnect(self, client, userdata, *args):
         self.online = False
-        self._fire_status(False, "已断开")
+        if self.running:
+            self._fire_status(False, "连接断开，正在重连…")
+        else:
+            self._fire_status(False, "已断开")
 
     def _on_message(self, client, userdata, msg):
         topic = msg.topic

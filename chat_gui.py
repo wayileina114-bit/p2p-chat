@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1655,6 +1655,7 @@ class ChatApp:
         self._typing_last = 0.0        # 上次发送“正在输入”广播的时间戳（节流用）
         self._members_visible = False  # 成员列表面板是否展开
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
+        self._dnd = False              # 免打扰（静音通知+提示音）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1716,6 +1717,12 @@ class ChatApp:
                                         text_color=C("text_2"), font=(FONT, 14),
                                         command=self._toggle_theme)
         self.theme_btn.pack(side="right", padx=(0, 12), pady=12)
+        self.dnd_btn = ctk.CTkButton(top, text=("🔕" if self._dnd else "🔔"),
+                                       width=40, height=32, corner_radius=8,
+                                       fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                       text_color=C("text_2"), font=(FONT, 14),
+                                       command=self._toggle_dnd)
+        self.dnd_btn.pack(side="right", padx=(0, 8), pady=12)
 
         self.top_avatar = ctk.CTkLabel(top, text="", width=34, height=34,
                                        corner_radius=17, fg_color=C("input_bg"), cursor="hand2")
@@ -1952,6 +1959,15 @@ class ChatApp:
 
     def _toggle_theme(self):
         self._set_theme("light" if self.appearance == "dark" else "dark")
+
+    def _toggle_dnd(self):
+        """免打扰开关：一键静音通知 + 提示音。"""
+        self._dnd = not self._dnd
+        try:
+            self.dnd_btn.configure(text="🔕" if self._dnd else "🔔")
+        except Exception:
+            pass
+        self._set_status("已开启免打扰" if self._dnd else "已关闭免打扰", "ok")
 
     def _set_theme(self, mode):
         if mode not in THEMES or mode == self.appearance:
@@ -2560,6 +2576,8 @@ class ChatApp:
         """后台/非当前会话收到新消息时弹 Windows 通知；前台正在看时静默。"""
         if mine or system:
             return
+        if self._dnd:
+            return
         if not self.notify_popup:
             return
         if s["key"] == self._current and self._window_focused:
@@ -2594,7 +2612,7 @@ class ChatApp:
             s["messages"] = s["messages"][-self.FEED_MAX:]
         self._save_session(s)
         self._maybe_notify(s, name, text, mine, system)
-        if not mine and self.notify_sound and not system:
+        if not mine and self.notify_sound and not system and not self._dnd:
             _play_notify_sound()
         if key == self._current:
             self._stick_bottom = self._at_bottom()

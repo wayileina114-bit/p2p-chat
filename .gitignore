@@ -18,6 +18,7 @@ downloads/
 # 临时诊断文件
 _diag*.py
 _smoke*.py
+_icon_preview.png
 
 # 系统 / 编辑器
 Thumbs.db

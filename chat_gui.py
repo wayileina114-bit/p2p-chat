@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.0.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.0.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1375,6 +1375,12 @@ class ChatApp:
                                          command=self._toggle_connect)
         self.connect_btn.pack(side="left", pady=12, padx=(0, 8))
 
+        self.update_btn = ctk.CTkButton(top, text="🔄", width=36, height=32, corner_radius=8,
+                                         fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                         text_color=C("text_2"), font=(FONT, 14),
+                                         command=self._manual_check_update)
+        self.update_btn.pack(side="right", padx=(0, 8), pady=12)
+
         self.theme_btn = ctk.CTkButton(top, text=("☀️" if self.appearance == "dark" else "🌙"),
                                        width=36, height=32, corner_radius=8,
                                        fg_color=C("input_bg"), hover_color=C("input_hover"),
@@ -1690,11 +1696,25 @@ class ChatApp:
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "P2PChat-App", "Accept": "application/octet-stream"})
                 with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
+                    total = 0
+                    try:
+                        total = int(r.headers.get("Content-Length") or 0)
+                    except Exception:
+                        total = 0
+                    done = 0
+                    last_pct = -1
                     while True:
                         chunk = r.read(65536)
                         if not chunk:
                             break
                         f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            pct = int(done * 100 / total)
+                            if pct != last_pct:
+                                last_pct = pct
+                                self.root.after(0, lambda p=pct: self._set_status(
+                                    f"正在下载新版本安装包… {p}%", "accent"))
                 self.root.after(0, lambda: self._run_installer(dest))
             except Exception as e:
                 self.root.after(0, lambda e=e: self._set_status(

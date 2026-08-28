@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -101,6 +101,7 @@ DEFAULT_PORT = 1883
 CHUNK_SIZE = 512 * 1024          # 每个分片 512KB（二进制直传，更大分片减少往返次数，提速）
 LAN_PORT = 47654                  # 局域网直连监听端口（同网段文件加速，失败回退 MQTT）
 LAN_DISCOVER_PORT = 47655        # 局域网成员自动发现端口（UDP 广播）
+LAN_MSG_PORT = 47656              # 局域网常驻消息直连端口（文字/文件/语音后台自动走直连）
 MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
@@ -880,6 +881,10 @@ class MqttBackend:
         self.on_lan_peers = on_lan_peers
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms, last_seen}
         self._lan_stop_evt = threading.Event()
+        self._lan_conns = {}          # cid -> 常驻 TCP 连接（同网段直连通道，全自动维护）
+        self._seen_mids = set()       # 近期已处理的消息 mid（直连 + MQTT 双通道去重）
+        self._lan_msg_sock = None     # 常驻消息连接监听 socket
+        self._lan_msg_stop = threading.Event()
         self._delivered_acked = set()  # 已自动回过“已送达”的消息 mid
 
         self.online = False
@@ -1059,9 +1064,12 @@ class MqttBackend:
             return
         if data.get("cid") == self.cid:
             return
-        self._auto_delivered(room, str(data.get("mid", "")), False)
+        _mid = str(data.get("mid", ""))
+        if _mid and not self._check_seen(_mid):
+            return
+        self._auto_delivered(room, _mid, False)
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
-                        str(data.get("text", ""))[:MAX_TEXT], False, str(data.get("mid", "")),
+                        str(data.get("text", ""))[:MAX_TEXT], False, _mid,
                         data.get("reply"))
 
     def _handle_presence(self, topic, raw):
@@ -1152,10 +1160,13 @@ class MqttBackend:
             return
         if not sender or sender == self.cid:
             return
-        self._auto_delivered(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), True)
+        _mid = str(data.get("mid", ""))
+        if _mid and not self._check_seen(_mid):
+            return
+        self._auto_delivered(self.DM_FILE_PREFIX + str(sender), _mid, True)
         if self.on_dm:
             self.on_dm(sender, str(data.get("name", "匿名"))[:60],
-                       str(data.get("text", ""))[:MAX_TEXT], str(data.get("mid", "")),
+                       str(data.get("text", ""))[:MAX_TEXT], _mid,
                        data.get("reply"))
 
     # --------------------------- 文件控制 ---------------------------
@@ -1319,9 +1330,12 @@ class MqttBackend:
         self._client = self._build()
         self._client.loop_start()
         threading.Thread(target=self._prune_loop, daemon=True).start()
-        # 后台局域网成员自动发现（同网段成员互通的基础）
+        # 后台局域网成员自动发现 + 常驻直连（同网段一切通讯自动走直连）
         self._lan_stop_evt = threading.Event()
+        self._lan_msg_stop = threading.Event()
         threading.Thread(target=self._lan_discover_loop, daemon=True).start()
+        if self.fernet is None:  # 明文模式才启用直连；加密时全走 MQTT 保证安全
+            threading.Thread(target=self._lan_msg_listener, daemon=True).start()
         try:
             self._client.connect_async(self.broker, self.port, keepalive=30)
         except Exception as e:
@@ -1332,6 +1346,21 @@ class MqttBackend:
         self.running = False
         try:
             self._lan_stop_evt.set()
+        except Exception:
+            pass
+        try:
+            self._lan_msg_stop.set()
+        except Exception:
+            pass
+        for cid, conn in list(getattr(self, "_lan_conns", {}).items()):
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._lan_conns = {}
+        try:
+            if self._lan_msg_sock is not None:
+                self._lan_msg_sock.close()
         except Exception:
             pass
         for p in self._pending.values():
@@ -1443,6 +1472,13 @@ class MqttBackend:
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(self._topic_room(room) + "/msg", payload, qos=1)
+        # 局域网直连加速：同房间的同网段成员也后台直发一份（MQTT 仍兜底，双通道去重）
+        if self.fernet is None:
+            for cid, p in list(self._lan_peers.items()):
+                if room in (p.get("rooms") or []):
+                    self._send_lan(cid, {"kind": "text", "room": room, "mid": mid,
+                                         "name": self.nickname, "cid": self.cid,
+                                         "text": text, "reply": reply or {}})
         self._fire_text(room, self.nickname, text, True, mid, reply)
         return True
 
@@ -1458,6 +1494,11 @@ class MqttBackend:
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(f"{self.NS}/dms/{target_cid}", payload, qos=1)
+        # 局域网直连加速：目标同网段时后台直发一份（MQTT 兜底，双通道去重）
+        if self.fernet is None:
+            self._send_lan(target_cid, {"kind": "dm", "to": target_cid, "mid": mid,
+                                        "name": self.nickname, "cid": self.cid,
+                                        "text": text, "reply": reply or {}})
         return True
 
     def send_recall(self, target, mid, is_dm=False):
@@ -1748,12 +1789,15 @@ class MqttBackend:
                             p = self._lan_peers.get(cid)
                             if p is None or p.get("lan_ip") != lan_ip or p.get("name") != info.get("name"):
                                 changed = True
+                            was_new = cid not in self._lan_peers
                             self._lan_peers[cid] = {
                                 "name": str(info.get("name", "匿名"))[:60],
                                 "lan_ip": lan_ip,
                                 "rooms": list(info.get("rooms") or []),
                                 "last_seen": now,
                             }
+                            if was_new:
+                                self._maybe_connect_lan(cid, lan_ip)
                     except Exception:
                         pass
                 except socket.timeout:
@@ -1782,6 +1826,174 @@ class MqttBackend:
                                    for cid, p in self._lan_peers.items()})
             except Exception:
                 pass
+
+    # --------------------------- 局域网常驻直连（全自动） ---------------------------
+
+    @staticmethod
+    def _lan_read_line(sock):
+        """从 socket 读一行（到 \n），返回 str 或 None（超时/断开）。"""
+        buf = b""
+        try:
+            sock.settimeout(30)
+            while True:
+                ch = sock.recv(1)
+                if not ch:
+                    return None
+                if ch == b"\n":
+                    return buf.decode("utf-8", "ignore")
+                buf += ch
+                if len(buf) > 65536:
+                    return None
+        except Exception:
+            return None
+
+    def _maybe_connect_lan(self, cid, ip):
+        """与同网段成员建立常驻直连（后台线程，不阻塞发现循环）。"""
+        if not cid or cid == self.cid or self.fernet is not None:
+            return
+        if cid in self._lan_conns:
+            return
+        if self.cid >= cid:  # 约定：cid 小者主动连，避免双向重复建连
+            return
+        threading.Thread(target=self._lan_connect_worker, args=(cid, ip), daemon=True).start()
+
+    def _lan_connect_worker(self, cid, ip):
+        conn = None
+        try:
+            conn = socket.create_connection((ip, LAN_MSG_PORT), timeout=2)
+            conn.settimeout(30)
+            conn.sendall((json.dumps({"hello": 1, "cid": self.cid}) + "\n").encode("utf-8"))
+            threading.Thread(target=self._conn_reader, args=(conn,), daemon=True).start()
+        except Exception:
+            try:
+                if conn is not None:
+                    conn.close()
+            except Exception:
+                pass
+
+    def _lan_msg_listener(self):
+        """常驻直连监听线程：接受同网段成员的主动连接。"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("0.0.0.0", LAN_MSG_PORT))
+            sock.listen(8)
+            sock.settimeout(1.0)
+            self._lan_msg_sock = sock
+        except Exception:
+            return
+        while not self._lan_msg_stop.is_set():
+            try:
+                conn, _addr = sock.accept()
+                conn.settimeout(30)
+                conn.sendall((json.dumps({"hello": 1, "cid": self.cid}) + "\n").encode("utf-8"))
+                threading.Thread(target=self._conn_reader, args=(conn,), daemon=True).start()
+            except socket.timeout:
+                continue
+            except Exception:
+                try:
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def _conn_reader(self, conn):
+        """连接读线程：先收 hello 确认身份，再逐帧处理。"""
+        peer_cid = ""
+        try:
+            line = self._lan_read_line(conn)
+            if not line:
+                return
+            try:
+                h = json.loads(line)
+                peer_cid = str(h.get("cid", ""))
+            except Exception:
+                return
+            if not peer_cid or peer_cid == self.cid:
+                return
+            # 去重：若已有同 cid 连接则关闭新连接
+            old = self._lan_conns.get(peer_cid)
+            if old is not None and old is not conn:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return
+            self._lan_conns[peer_cid] = conn
+            # 循环读帧
+            while not self._lan_msg_stop.is_set():
+                frame = self._lan_read_line(conn)
+                if frame is None:
+                    break
+                try:
+                    self._handle_lan_frame(peer_cid, frame)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            if self._lan_conns.get(peer_cid) is conn:
+                try:
+                    self._lan_conns.pop(peer_cid, None)
+                except Exception:
+                    pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _send_lan(self, peer_cid, obj):
+        """向同网段成员常驻连接发送一帧（失败即断开连接，消息仍由 MQTT 兜底）。"""
+        conn = self._lan_conns.get(peer_cid)
+        if conn is None:
+            return
+        try:
+            conn.sendall((json.dumps(obj, ensure_ascii=False) + "\n").encode("utf-8"))
+        except Exception:
+            try:
+                self._lan_conns.pop(peer_cid, None)
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def _handle_lan_frame(self, peer_cid, line):
+        """处理局域网直连帧（文字/私聊）。"""
+        try:
+            data = json.loads(line)
+        except Exception:
+            return
+        kind = data.get("kind")
+        mid = str(data.get("mid", ""))
+        if kind == "text" and mid:
+            if not self._check_seen(mid):
+                return
+            room = str(data.get("room", ""))
+            if room in self.rooms:
+                self._fire_text(room, str(data.get("name", "匿名"))[:60],
+                                str(data.get("text", ""))[:MAX_TEXT], False, mid,
+                                data.get("reply"))
+        elif kind == "dm" and mid:
+            if not self._check_seen(mid):
+                return
+            sender = str(data.get("cid", ""))
+            if sender and sender != self.cid and self.on_dm:
+                self.on_dm(sender, str(data.get("name", "匿名"))[:60],
+                           str(data.get("text", ""))[:MAX_TEXT], mid, data.get("reply"))
+
+    def _check_seen(self, mid):
+        """消息去重：已处理过返回 False，否则记录并返回 True。"""
+        if mid in self._seen_mids:
+            return False
+        if len(self._seen_mids) > 4000:
+            self._seen_mids.clear()
+        self._seen_mids.add(mid)
+        return True
 
     # --------------------------- 文件发送流程 ---------------------------
 

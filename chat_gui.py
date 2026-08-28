@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.3.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.4.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1079,14 +1079,7 @@ class ChatApp:
             messagebox.showerror("打开失败", str(e))
 
     def _open_image(self, path):
-        try:
-            if os.name == "nt":
-                os.startfile(path)
-            else:
-                import subprocess
-                subprocess.Popen(["xdg-open", path])
-        except Exception as e:
-            messagebox.showerror("打开失败", str(e))
+        ImagePreview(self.root, path)
 
     def _render_top_avatar(self):
         img = _load_ctk_image(self._avatar, 30, 30) if self._avatar else None
@@ -1291,9 +1284,17 @@ class ChatApp:
         ctk.CTkLabel(self.session_frame, text=text, text_color="#9aa0ab",
                      font=(FONT, 10), anchor="w").pack(fill="x", padx=4, pady=(8, 2))
 
+    def _unread_badge(self, parent, n):
+        txt = str(n) if n < 100 else "99+"
+        w = max(20, 16 + (len(txt) - 1) * 8)
+        return ctk.CTkLabel(parent, text=txt, width=w, height=20, corner_radius=10,
+                            fg_color="#e5484d", text_color="#ffffff", font=(FONT, 10, "bold"))
+
     def _add_group_item(self, room):
         key = self._group_key(room)
         selected = key == self._current
+        s = self._sessions.get(key)
+        unread = (s.get("unread") or 0) if s else 0
         n = sum(1 for p in self._peers.values() if room in (p.get("rooms") or []))
         row = ctk.CTkFrame(self.session_frame, corner_radius=10,
                            fg_color=("#dbe7ff" if selected else "transparent"))
@@ -1302,6 +1303,8 @@ class ChatApp:
                            text_color=("#1f6feb" if selected else "#1d1d1f"),
                            font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2")
         lbl.pack(side="left", fill="x", expand=True, padx=12, pady=7)
+        if unread:
+            self._unread_badge(row, unread).pack(side="right", padx=(0, 6))
         cross = ctk.CTkLabel(row, text="✕", width=24, text_color="#b0b4bd", cursor="hand2")
         cross.pack(side="right", padx=(0, 8))
         for w in (row, lbl):
@@ -1312,17 +1315,17 @@ class ChatApp:
         key = s["key"]
         selected = key == self._current
         mark = "● " if s["online"] else "○ "
-        title = mark + s["name"]
-        if s.get("unread"):
-            title += f"  ({s['unread']})"
+        unread = s.get("unread") or 0
         row = ctk.CTkFrame(self.session_frame, corner_radius=10,
                            fg_color=("#dbe7ff" if selected else "transparent"))
         row.pack(fill="x", pady=1)
-        lbl = ctk.CTkLabel(row, text=title, anchor="w",
+        lbl = ctk.CTkLabel(row, text=mark + s["name"], anchor="w",
                            text_color=("#1f6feb" if selected else "#1d1d1f"),
-                           font=(FONT, 12, "bold" if (selected or s.get("unread")) else "normal"),
+                           font=(FONT, 12, "bold" if (selected or unread) else "normal"),
                            cursor="hand2")
-        lbl.pack(fill="x", padx=12, pady=7)
+        lbl.pack(side="left", fill="x", expand=True, padx=12, pady=7)
+        if unread:
+            self._unread_badge(row, unread).pack(side="right", padx=(0, 10))
         for w in (row, lbl):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
 
@@ -1679,7 +1682,7 @@ class ChatApp:
                              font=(FONT, 9)).pack(side="right")
             _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
             _img.pack(padx=6, pady=4)
-            _img.bind("<Double-Button-1>", lambda e, p=path: self._open_image(p))
+            _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
             _img.bind("<Button-3>", lambda e, p=path: self._copy_text_menu(e, p))
             self._scroll_bottom()
             self._trim_feed()
@@ -1798,6 +1801,67 @@ class ChatApp:
         except Exception:
             pass
         self.root.destroy()
+
+
+class ImagePreview:
+    """内置图片预览窗口：双击聊天里的图片弹出，等比放大显示，Esc / 关闭按钮退出。"""
+
+    def __init__(self, master, path):
+        self._ctk_img = None
+        if not (_HAS_PIL and path and os.path.isfile(path)):
+            messagebox.showinfo("无法预览", "图片文件不存在或无法读取。")
+            return
+        try:
+            from PIL import Image  # 惰性加载
+            img = Image.open(path)
+            if img.mode not in ("RGB", "RGBA", "L"):
+                img = img.convert("RGB")
+            img.thumbnail((820, 600))
+            ctk_img = CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
+        except Exception:
+            messagebox.showinfo("无法预览", "图片文件无法读取。")
+            return
+
+        self._ctk_img = ctk_img  # 持有引用，防止被 GC
+        top = ctk.CTkToplevel(master)
+        self.top = top
+        top.title("图片预览")
+        top.configure(fg_color="#15171f")
+        top.resizable(False, False)
+
+        ctk.CTkLabel(top, text=os.path.basename(path), text_color="#aeb4c0",
+                     font=(FONT, 11)).pack(padx=20, pady=(12, 4))
+        ctk.CTkLabel(top, image=ctk_img, text="").pack(padx=24, pady=(0, 4))
+        ctk.CTkButton(top, text="关闭", width=90, height=30, corner_radius=8,
+                      fg_color="#3a4150", hover_color="#2c323e",
+                      font=(FONT, 12), command=top.destroy).pack(pady=(4, 14))
+
+        # 用图片自身（逻辑）尺寸设置窗口，避免高分屏下 winfo 物理像素被误当逻辑像素导致窗口放大
+        scale = 1.0
+        try:
+            scale = float(top.tk.call("tk", "scaling")) / 1.3333333
+        except Exception:
+            scale = 1.0
+        if scale <= 0:
+            scale = 1.0
+        w = img.width + 48
+        h = img.height + 104
+        # 居中于父窗口，并带 Esc 关闭
+        try:
+            mw = master.winfo_width() / scale
+            mh = master.winfo_height() / scale
+            mx = master.winfo_rootx() / scale
+            my = master.winfo_rooty() / scale
+            x = int(mx + (mw - w) // 2)
+            y = int(my + max(0, (mh - h) // 3))
+        except Exception:
+            x, y = 100, 100
+        top.geometry(f"{int(w)}x{int(h)}+{x}+{y}")
+        top.bind("<Escape>", lambda e: top.destroy())
+        try:
+            top.focus_set()
+        except Exception:
+            pass
 
 
 class AboutDialog:

@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.15"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.16"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2079,9 +2079,10 @@ class ChatApp:
         return "break"
 
     def _pick_file(self):
-        path = filedialog.askopenfilename(title="选择要发送的文件或图片")
-        if path:
-            self._do_send_file(path)
+        paths = filedialog.askopenfilenames(title="选择要发送的文件或图片（可多选）")
+        for path in paths:
+            if path and os.path.isfile(path):
+                self._do_send_file(path)
 
     def _on_drop(self, event):
         try:
@@ -2302,17 +2303,6 @@ class ChatApp:
             self._trim_feed()
         except Exception:
             self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts)
-
-    def _copy_text_menu(self, event, text):
-        try:
-            menu = tk.Menu(self.root, tearoff=0)
-            menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
-            menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            try:
-                menu.grab_release()
-            except Exception:
-                pass
 
     def _copy_to_clipboard(self, text):
         try:

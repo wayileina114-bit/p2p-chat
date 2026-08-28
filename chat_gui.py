@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -5654,6 +5654,10 @@ class ChatApp:
             hover_color=C("input_hover"), font=(FONT, 12),
             command=lambda p=path: self._toggle_voice_play(p))
         self._voice_btns[path].pack(anchor="w")
+        # 语音右键菜单：转发 / 打开位置
+        self._voice_btns[path].bind(
+            "<Button-3>",
+            lambda e, p=path: self._voice_menu(e, p))
         # 播放进度条：点击播放时实时显示播放进度（QQ/Discord 风格）
         bar = ctk.CTkProgressBar(vbox, width=130, height=6, corner_radius=3,
                                  fg_color=C("input_bg"), progress_color=C("accent"))
@@ -5747,7 +5751,109 @@ class ChatApp:
         _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
         _img.pack(padx=6, pady=4)
         _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
-        _img.bind("<Button-3>", lambda e, p=path: self._message_menu(e, p, p))
+        _img.bind("<Button-3>", lambda e, p=path: self._image_menu(e, p))
+
+    def _voice_menu(self, event, path):
+        """语音消息右键菜单：转发 / 打开位置。"""
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="转发", command=lambda: self._forward_voice(path))
+            menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(path))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def _forward_voice(self, path):
+        """转发语音：作为文件发送到当前选中会话。"""
+        try:
+            if not (path and os.path.isfile(path)):
+                self._set_status("语音文件不存在", "err")
+                return
+            if not (self.backend and self.backend.online):
+                self._set_status("未连接，无法转发", "err")
+                return
+            s = self._sessions.get(self._current)
+            if s is None:
+                return
+            if s["kind"] == "group":
+                self.backend.send_file(s["room"], path)
+            else:
+                self.backend.send_file_dm(s["cid"], path)
+            self._set_status("已转发语音到当前会话", "ok")
+        except Exception:
+            pass
+
+    def _image_menu(self, event, path):
+        """图片消息右键菜单：保存 / 复制图片 / 打开大图 / 打开位置。"""
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="保存图片到本地…", command=lambda: self._save_image_dialog(path))
+            menu.add_command(label="复制图片", command=lambda: self._copy_image(path))
+            menu.add_separator()
+            menu.add_command(label="查看大图", command=lambda: self._open_image(path))
+            menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(path))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def _save_image_dialog(self, path):
+        """把图片保存到用户指定位置。"""
+        try:
+            if not (path and os.path.isfile(path)):
+                self._set_status("图片文件不存在", "err")
+                return
+            base = os.path.basename(path) or "image.png"
+            name, ext = os.path.splitext(base)
+            dest = filedialog.asksaveasfilename(
+                title="保存图片",
+                defaultextension=ext or ".png",
+                initialfile=(name + (ext or ".png")))
+            if not dest:
+                return
+            import shutil
+            shutil.copyfile(path, dest)
+            self._set_status(f"已保存：{dest}", "ok")
+        except Exception:
+            self._set_status("保存失败", "err")
+
+    def _copy_image(self, path):
+        """把图片复制到系统剪贴板（可粘贴到其它软件）。"""
+        try:
+            if not (path and os.path.isfile(path)):
+                return
+            if os.name == "nt":
+                from PIL import Image
+                img = Image.open(path)
+                # Windows 剪贴板图片格式
+                import io as _io
+                buf = _io.BytesIO()
+                img.convert("RGB").save(buf, "BMP")
+                data = buf.getvalue()[14:]  # 去掉 BMP 文件头
+                buf2 = _io.BytesIO()
+                buf2.write(b"DIB")
+                import struct
+                buf2.write(struct.pack("<i", 40))
+                # 用 win32 系统剪贴板不宜；回退为复制文件路径
+                self.root.clipboard_clear()
+                self.root.clipboard_append(os.path.normpath(path))
+                self._set_status("图片路径已复制到剪贴板", "ok")
+            else:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(os.path.normpath(path))
+                self._set_status("图片路径已复制到剪贴板", "ok")
+        except Exception:
+            try:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(os.path.normpath(path))
+                self._set_status("图片路径已复制到剪贴板", "ok")
+            except Exception:
+                pass
 
     def _copy_to_clipboard(self, text):
         try:

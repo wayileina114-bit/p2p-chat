@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.4.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.4.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1830,6 +1830,8 @@ class ChatApp:
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
+        self._body_labels = {}         # mid -> 正文 label（局部更新编辑）
+        self._footer_labels = {}       # mid -> 已读/送达/已编辑 标签（局部更新回执）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -3586,22 +3588,36 @@ class ChatApp:
         self._append_message(s["key"], name, text, False, mid=mid, reply=reply)
         self._schedule_session_list()
 
-    def _refresh_reaction_badge(self, mid):
-        """局部刷新某条消息的回应 badge，避免整页重渲染（性能优化）。"""
-        bubble = self._bubble_frames.get(mid)
-        old_row = self._reaction_rows.pop(mid, None)
-        if old_row is not None:
+    def _footer_text(self, m):
+        """计算消息底部（已读/已送达/已编辑）标签的文案与颜色。"""
+        edited = " · 已编辑" if m.get("edited") else ""
+        rb = m.get("read_by") or []
+        db = m.get("delivered_by") or []
+        if rb:
+            names = "、".join(rb[:5])
+            if len(rb) > 5:
+                names += f" 等 {len(rb)} 人"
+            return f"已读 {names}{edited}", C("accent")
+        if db:
+            names = "、".join(db[:5])
+            if len(db) > 5:
+                names += f" 等 {len(db)} 人"
+            return f"已送达 {names}{edited}", C("text_mute")
+        if m.get("edited"):
+            return "已编辑", C("text_mute")
+        return "", None
+
+    def _refresh_reaction_row(self, mid, m):
+        """重建某条消息的回应 badge 行。"""
+        old = self._reaction_rows.pop(mid, None)
+        if old is not None:
             try:
-                old_row.destroy()
+                old.destroy()
             except Exception:
                 pass
+        bubble = self._bubble_frames.get(mid)
         if bubble is None:
-            self._render_feed()  # 兜底：气泡不在缓存里（如刚展开历史），整页刷新
             return
-        s = self._sessions.get(self._current)
-        m = None
-        if s:
-            m = next((x for x in s["messages"] if x.get("mid") == mid), None)
         if m and m.get("reactions"):
             row = ctk.CTkFrame(bubble, fg_color="transparent")
             row.pack(anchor="e", padx=12, pady=(0, 4))
@@ -3612,6 +3628,37 @@ class ChatApp:
                 ctk.CTkLabel(row, text=f"{emo} {n}", text_color=C("text_mute"),
                              font=(FONT, 9)).pack(side="left", padx=2)
             self._reaction_rows[mid] = row
+
+    def _refresh_message_badge(self, mid):
+        """局部刷新单条消息的正文/回执/回应，避免整页重渲染（性能优化）。"""
+        if mid not in self._bubble_frames:
+            self._schedule_feed_refresh()  # 兜底：气泡不在缓存里，整页刷新
+            return
+        s = self._sessions.get(self._current)
+        m = None
+        if s:
+            m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+        if m is None:
+            self._schedule_feed_refresh()
+            return
+        body = self._body_labels.get(mid)
+        if body is not None:
+            try:
+                body.configure(text=str(m.get("text", "")))
+            except Exception:
+                pass
+        lbl = self._footer_labels.get(mid)
+        if lbl is not None:
+            text, color = self._footer_text(m)
+            try:
+                if text:
+                    lbl.configure(text=text, text_color=color)
+                else:
+                    lbl.destroy()
+                    self._footer_labels.pop(mid, None)
+            except Exception:
+                pass
+        self._refresh_reaction_row(mid, m)
 
     def _receive_reaction(self, room, mid, emoji, cid, name):
         """收到表情回应：切换该表情下某人的回应（再次发送=取消）。"""
@@ -3636,7 +3683,7 @@ class ChatApp:
                     bucket[cid] = name or "匿名"
                 self._save_session(s)
                 if key == self._current:
-                    self._refresh_reaction_badge(mid)
+                    self._refresh_message_badge(mid)
                 return
 
     def _do_reaction(self, mid, emoji):
@@ -3663,7 +3710,7 @@ class ChatApp:
             bucket[self.cid] = my_name
         self._save_session(s)
         self.backend.send_reaction(target, mid, emoji, is_dm)
-        self._refresh_reaction_badge(mid)
+        self._refresh_message_badge(mid)
 
     def _receive_edit(self, room, mid, who, text):
         """收到编辑指令：更新对应消息的正文并标记“已编辑”。"""
@@ -3682,7 +3729,7 @@ class ChatApp:
                 m["edited"] = True
                 self._save_session(s)
                 if key == self._current:
-                    self._schedule_feed_refresh()
+                    self._refresh_message_badge(mid)
                 return
 
     def _do_edit(self, mid, new_text):
@@ -3729,7 +3776,7 @@ class ChatApp:
                     names.append(name)
                 self._save_session(s)
                 if key == self._current:
-                    self._schedule_feed_refresh()
+                    self._refresh_message_badge(mid)
                 return
 
     def _receive_read(self, room, mid, cid, name):
@@ -3750,7 +3797,7 @@ class ChatApp:
                     names.append(name)
                 self._save_session(s)
                 if key == self._current:
-                    self._schedule_feed_refresh()
+                    self._refresh_message_badge(mid)
                 return
 
     def _receive_recall(self, room, mid, who):
@@ -4102,6 +4149,8 @@ class ChatApp:
                             text_color=(C("mine_text") if mine else C("other_text")),
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
+        if mid:
+            self._body_labels[mid] = body
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
         body.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
         bubble.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
@@ -4112,21 +4161,26 @@ class ChatApp:
             for w in (bubble, body):
                 w.bind("<Enter>", _enter)
                 w.bind("<Leave>", _leave)
+        footer = None
         if mine and read_by:
             names = "、".join(read_by[:5])
             if len(read_by) > 5:
                 names += f" 等 {len(read_by)} 人"
-            ctk.CTkLabel(bubble, text=f"已读 {names}" + (" · 已编辑" if edited else ""),
-                         text_color=C("accent"), font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+            footer = ctk.CTkLabel(bubble, text=f"已读 {names}" + (" · 已编辑" if edited else ""),
+                                  text_color=C("accent"), font=(FONT, 9))
         elif mine and delivered_by:
             names = "、".join(delivered_by[:5])
             if len(delivered_by) > 5:
                 names += f" 等 {len(delivered_by)} 人"
-            ctk.CTkLabel(bubble, text=f"已送达 {names}" + (" · 已编辑" if edited else ""),
-                         text_color=C("text_mute"), font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+            footer = ctk.CTkLabel(bubble, text=f"已送达 {names}" + (" · 已编辑" if edited else ""),
+                                  text_color=C("text_mute"), font=(FONT, 9))
         elif edited:
-            ctk.CTkLabel(bubble, text="已编辑", text_color=C("text_mute"),
-                         font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+            footer = ctk.CTkLabel(bubble, text="已编辑", text_color=C("text_mute"),
+                                  font=(FONT, 9))
+        if footer is not None:
+            footer.pack(anchor="e", padx=12, pady=(0, 4))
+            if mid:
+                self._footer_labels[mid] = footer
         if reactions:
             row = ctk.CTkFrame(bubble, fg_color="transparent")
             row.pack(anchor="e", padx=12, pady=(0, 4))
@@ -4381,6 +4435,8 @@ class ChatApp:
         self._images = []
         self._bubble_frames = {}
         self._reaction_rows = {}
+        self._body_labels = {}
+        self._footer_labels = {}
         s = self._sessions.get(self._current)
         if s is None:
             self._update_chat_title()

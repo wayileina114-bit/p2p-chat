@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.0.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -85,6 +85,20 @@ MAX_TEXT = 10000                 # 单条文字消息长度上限（防异常/�
 
 FONT = "Microsoft YaHei UI"
 HINT = "输入文字，回车发送；也可直接把图片 / 文件拖到这里"
+
+EMOJIS = [
+    "😀","😁","😂","🤣","😊","😇","🙂","😉","😍","🥰",
+    "😘","😜","🤪","🤔","🤨","😐","😶","🙄","😏","😣",
+    "😥","😮","🤯","😴","🥱","😷","🤒","🥵","🥶","😎",
+    "🤓","🥳","😡","😠","🤬","😱","😨","😰","😢","😭",
+    "😤","😩","🥺","🤗","🤭","🤫","😌","😪","🤤","🥴",
+    "😳","🤡","👋","🤝","👍","👎","👏","🙏","💪","🤞",
+    "🤟","✌️","🤙","❤️","🧡","💛","💚","💙","💜","🖤",
+    "🤍","💔","💯","✨","⭐","🌟","⚡","🔥","💥","💫",
+    "🌈","☀️","🌙","🍀","🌹","🌸","🎉","🎊","🎁","🏆",
+    "🥇","🚀","✈️","🚗","⏰","⌛","📌","📎","🔒","🔑",
+    "🔍","💡","📈","📉","🎵","🎶","🎮","🎯","🏀","⚽",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -1437,6 +1451,9 @@ class ChatApp:
         ctk.CTkButton(btncol, text="📎 文件/图片", width=88, height=30, corner_radius=8,
                       fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                       font=(FONT, 12), command=self._pick_file).pack(fill="x", pady=3)
+        ctk.CTkButton(btncol, text="😊 表情", width=88, height=30, corner_radius=8,
+                      fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
+                      font=(FONT, 12), command=self._toggle_emoji_panel).pack(fill="x", pady=3)
 
     # --------------------------- 菜单 / 环境检测 ---------------------------
 
@@ -2172,6 +2189,55 @@ class ChatApp:
         for path in paths:
             if path and os.path.isfile(path):
                 self._do_send_file(path)
+
+    def _toggle_emoji_panel(self):
+        if getattr(self, "_emoji_win", None) is not None:
+            self._close_emoji_panel()
+            return
+        try:
+            win = ctk.CTkToplevel(self.root)
+            self._emoji_win = win
+            win.overrideredirect(True)
+            win.configure(fg_color=C("panel"))
+            win.attributes("-topmost", True)
+            cols = 10
+            grid = ctk.CTkFrame(win, fg_color="transparent")
+            grid.pack(padx=6, pady=6)
+            for i, em in enumerate(EMOJIS):
+                ctk.CTkButton(grid, text=em, width=34, height=34, corner_radius=8,
+                              fg_color="transparent", hover_color=C("hover"),
+                              text_color=C("text"), font=("Segoe UI Emoji", 15),
+                              command=lambda e=em: self._insert_emoji(e)
+                              ).grid(row=i // cols, column=i % cols, padx=1, pady=1)
+            win.bind("<Escape>", lambda e: self._close_emoji_panel())
+            win.update_idletasks()
+            w = win.winfo_reqwidth()
+            h = win.winfo_reqheight()
+            x = self.root.winfo_rootx() + self.root.winfo_width() - w - 24
+            y = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
+            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        except Exception:
+            self._emoji_win = None
+
+    def _close_emoji_panel(self):
+        if getattr(self, "_emoji_win", None) is not None:
+            try:
+                self._emoji_win.destroy()
+            except Exception:
+                pass
+            self._emoji_win = None
+
+    def _insert_emoji(self, em):
+        try:
+            if self._hint_active:
+                self.input_box.delete("1.0", "end")
+                self.input_box.configure(text_color=C("text"))
+                self._hint_active = False
+            self.input_box.insert("insert", em)
+            self.input_box.focus_set()
+        except Exception:
+            pass
+        self._close_emoji_panel()
 
     def _on_drop(self, event):
         try:

@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.0.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.0.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1879,28 +1879,49 @@ class ChatApp:
         row.bind("<Enter>", on_enter)
         row.bind("<Leave>", on_leave)
 
+    def _session_preview(self, s):
+        """返回会话最后一条消息的单行预览（QQ/Discord 风格）。"""
+        msgs = s.get("messages") or []
+        if not msgs:
+            return ""
+        m = msgs[-1]
+        txt = str(m.get("text") or "").strip()
+        if m.get("img_path"):
+            txt = "🖼 [图片]"
+        if not txt:
+            return ""
+        if m.get("mine"):
+            txt = "我: " + txt
+        txt = txt.replace("\n", " ").strip()
+        return txt if len(txt) <= 22 else txt[:22] + "…"
+
     def _add_group_item(self, room):
         key = self._group_key(room)
         selected = key == self._current
         s = self._sessions.get(key)
         unread = (s.get("unread") or 0) if s else 0
         n = sum(1 for p in self._peers.values() if room in (p.get("rooms") or []))
+        preview = self._session_preview(s) if s else ""
         row = ctk.CTkFrame(self.session_frame, corner_radius=8,
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
-        hash_lbl = ctk.CTkLabel(row, text="#", width=18, anchor="w",
+        hash_lbl = ctk.CTkLabel(row, text="#", width=18, anchor="n",
                                 text_color=(C("accent") if selected else C("text_mute")),
                                 font=(FONT, 13, "bold"), cursor="hand2")
-        hash_lbl.pack(side="left", padx=(10, 0), pady=7)
-        lbl = ctk.CTkLabel(row, text=room + (f"  {n}" if n else ""), anchor="w",
-                           text_color=(C("selected_text") if selected else C("text")),
-                           font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2")
-        lbl.pack(side="left", fill="x", expand=True, pady=7)
+        hash_lbl.pack(side="left", padx=(10, 0), pady=(6, 0))
+        mid = ctk.CTkFrame(row, fg_color="transparent")
+        mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
+        ctk.CTkLabel(mid, text=room + (f"  {n}" if n else ""), anchor="w",
+                     text_color=(C("selected_text") if selected else C("text")),
+                     font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2").pack(anchor="w")
+        if preview:
+            ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
+                         font=(FONT, 10), cursor="hand2").pack(anchor="w")
         if unread:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 6))
         cross = ctk.CTkLabel(row, text="✕", width=24, text_color=C("text_mute"), cursor="hand2")
         cross.pack(side="right", padx=(0, 6))
-        for w in (row, lbl, hash_lbl):
+        for w in [row, hash_lbl] + list(mid.winfo_children()):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
         cross.bind("<Button-1>", lambda e, r=room: self._remove_room(r))
         self._bind_row_hover(row, selected)
@@ -1909,21 +1930,26 @@ class ChatApp:
         key = s["key"]
         selected = key == self._current
         unread = s.get("unread") or 0
+        preview = self._session_preview(s)
         row = ctk.CTkFrame(self.session_frame, corner_radius=8,
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
-        dot = ctk.CTkLabel(row, text="●" if s["online"] else "○", width=18, anchor="w",
+        dot = ctk.CTkLabel(row, text="●" if s["online"] else "○", width=18, anchor="n",
                            text_color=(C("online") if s["online"] else C("text_mute")),
                            font=(FONT, 11, "bold"), cursor="hand2")
-        dot.pack(side="left", padx=(10, 0), pady=7)
-        lbl = ctk.CTkLabel(row, text=s["name"], anchor="w",
-                           text_color=(C("selected_text") if selected else C("text")),
-                           font=(FONT, 12, "bold" if (selected or unread) else "normal"),
-                           cursor="hand2")
-        lbl.pack(side="left", fill="x", expand=True, pady=7)
+        dot.pack(side="left", padx=(10, 0), pady=(6, 0))
+        mid = ctk.CTkFrame(row, fg_color="transparent")
+        mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
+        ctk.CTkLabel(mid, text=s["name"], anchor="w",
+                     text_color=(C("selected_text") if selected else C("text")),
+                     font=(FONT, 12, "bold" if (selected or unread) else "normal"),
+                     cursor="hand2").pack(anchor="w")
+        if preview:
+            ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
+                         font=(FONT, 10), cursor="hand2").pack(anchor="w")
         if unread:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 10))
-        for w in (row, lbl, dot):
+        for w in [row, dot] + list(mid.winfo_children()):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
             w.bind("<Button-3>", lambda e, s=s: self._dm_context_menu(e, s))
         self._bind_row_hover(row, selected)

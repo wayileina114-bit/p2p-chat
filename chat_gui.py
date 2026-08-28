@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -330,16 +330,17 @@ def _load_profile():
         "cid": cid,
         "name": str(d.get("name", "")).strip(),
         "avatar": str(d.get("avatar", "")).strip(),
+        "bio": str(d.get("bio", "")).strip(),
     }
 
 
-def _save_profile(name, avatar):
+def _save_profile(name, avatar, bio=""):
     _ensure_data_dir()
     p = os.path.join(DATA_DIR, "profile.json")
     try:
         with open(p, "w", encoding="utf-8") as f:
             json.dump({"cid": _load_identity(), "name": (name or "").strip(),
-                       "avatar": avatar or ""}, f, ensure_ascii=False)
+                       "avatar": avatar or "", "bio": (bio or "").strip()}, f, ensure_ascii=False)
     except Exception:
         pass
 
@@ -1653,11 +1654,12 @@ class ChatApp:
     GROUP_PREFIX = "room|"
     DM_PREFIX = "dm|"
 
-    def __init__(self, root, profile=None, name="", avatar=""):
+    def __init__(self, root, profile=None, name="", avatar="", bio=""):
         self.root = root
         self.cid = (profile or {}).get("cid") or _load_identity()
         self._profile_name = name
         self._avatar = avatar
+        self._bio = bio
         self.appearance = _APPEARANCE
         self.backend = None
         self._peers = {}            # cid -> {"name":.., "rooms":[..]}
@@ -1753,7 +1755,7 @@ class ChatApp:
                                        corner_radius=17, fg_color=C("input_bg"), cursor="hand2")
         self.top_avatar.pack(side="left", padx=(14, 6), pady=12)
         self._render_top_avatar()
-        self.top_avatar.bind("<Button-1>", lambda e: self._change_avatar())
+        self.top_avatar.bind("<Button-1>", lambda e: self._open_profile_card())
 
         ctk.CTkLabel(top, text="昵称", text_color=C("text_mute"), font=(FONT, 11)).pack(side="left", padx=(0, 5), pady=12)
         self.nick_var = ctk.StringVar(value=self._profile_name)
@@ -2125,6 +2127,76 @@ class ChatApp:
                                       fg_color=_name_color(name),
                                       text_color="#ffffff", font=(FONT, 15, "bold"))
 
+    def _open_profile_card(self):
+        """个人资料卡：头像 / 昵称 / ID / 个性签名。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("个人资料")
+            win.geometry("380x360")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="个人资料", font=(FONT, 15, "bold"),
+                         text_color=C("text")).pack(pady=(16, 8))
+
+            av = ctk.CTkLabel(win, text="", width=80, height=80, corner_radius=40,
+                              fg_color=C("input_bg"), cursor="hand2")
+            av.pack(pady=4)
+            self._avatar_preview_label(av)
+            av.bind("<Button-1>", lambda e: self._change_avatar())
+            ctk.CTkLabel(win, text="点击更换头像", font=(FONT, 9),
+                         text_color=C("text_mute")).pack()
+
+            name_var = ctk.StringVar(value=self._profile_name or self.nick_var.get())
+            ctk.CTkEntry(win, textvariable=name_var, width=240, height=32, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         font=(FONT, 12)).pack(pady=(12, 4))
+            ctk.CTkLabel(win, text=f"ID：{self.cid}", font=(FONT, 10),
+                         text_color=C("text_mute")).pack(pady=(0, 2))
+            ctk.CTkButton(win, text="📋 复制 ID", width=120, height=26, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
+                          font=(FONT, 11), command=lambda: self._copy_to_clipboard(self.cid)).pack(pady=2)
+
+            bio_var = ctk.StringVar(value=self._bio or "")
+            ctk.CTkEntry(win, textvariable=bio_var, width=240, height=32, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         placeholder_text="个性签名（选填）", font=(FONT, 12)).pack(pady=(10, 4))
+
+            def _save_all():
+                self._profile_name = name_var.get().strip() or "未命名"
+                self._bio = bio_var.get().strip()
+                try:
+                    self.nick_var.set(self._profile_name)
+                except Exception:
+                    pass
+                _save_profile(self._profile_name, self._avatar, self._bio)
+                self._set_status("资料已保存", "ok")
+                win.destroy()
+
+            ctk.CTkButton(win, text="保存", width=120, height=32, corner_radius=8,
+                          fg_color=C("accent"), hover_color=C("accent_hover"),
+                          font=(FONT, 12, "bold"), command=_save_all).pack(pady=10)
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
+    def _avatar_preview_label(self, lbl):
+        """把当前头像（或首字母）显示到个人资料卡。"""
+        try:
+            if self._avatar and os.path.isfile(self._avatar) and _HAS_PIL:
+                from PIL import Image
+                img = Image.open(self._avatar).convert("RGB")
+                img = img.resize((80, 80))
+                ctk_img = CTkImage(light_image=img, dark_image=img, size=(80, 80))
+                self._images.append(ctk_img)
+                lbl.configure(image=ctk_img, text="")
+            else:
+                name = self._profile_name or "未命名"
+                lbl.configure(image=None, text=name[:1].upper(),
+                              fg_color=_name_color(name), text_color="#ffffff",
+                              font=(FONT, 26, "bold"))
+        except Exception:
+            pass
+
     def _change_avatar(self):
         # 直接在主界面换头像，不再弹独立登录框
         path = filedialog.askopenfilename(
@@ -2137,7 +2209,7 @@ class ChatApp:
             self._avatar = saved
             self._my_avatar_ctk = None
             self._profile_name = self.nick_var.get().strip() or "未命名"
-            _save_profile(self._profile_name, self._avatar)
+            _save_profile(self._profile_name, self._avatar, self._bio)
             self._render_top_avatar()
             self._set_status("头像已更新", "ok")
         else:
@@ -2954,7 +3026,7 @@ class ChatApp:
     def _on_nick_changed(self):
         name = self.nick_var.get().strip() or "未命名"
         self._profile_name = name
-        _save_profile(name, self._avatar)
+        _save_profile(name, self._avatar, self._bio)
         if not self._avatar:
             self._render_top_avatar()
         if self.backend and self.backend.running:
@@ -4798,7 +4870,7 @@ def main():
         root.report_callback_exception = _report_callback_exception
         # 单窗口：直接进入主界面，头像/昵称/ID 都在主界面内设置，不再有独立登录层
         profile = _load_profile()
-        app = ChatApp(root, profile=profile, name=profile["name"], avatar=profile["avatar"])
+        app = ChatApp(root, profile=profile, name=profile["name"], avatar=profile["avatar"], bio=profile.get("bio", ""))
         app.check_for_update()          # 后台静默检查更新
         root.mainloop()
     except Exception:

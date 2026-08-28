@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.18"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.19"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -879,9 +879,13 @@ class MqttBackend:
             self._cleanup_part(tmp)
             self._fire_file(r["room"], "error", {"name": r["name"], "msg": "校验失败，文件可能损坏"})
             return
+        # 文件名安全化：防止对方伪造带路径穿越的名字（如 ..\..\evil.exe）写出 downloads 目录
+        safe_name = os.path.basename((r["name"] or "").replace("\\", "/"))
+        if not safe_name or safe_name in (".", ".."):
+            safe_name = "file"
         d = DOWNLOADS_DIR
         os.makedirs(d, exist_ok=True)
-        path = os.path.join(d, r["name"])
+        path = os.path.join(d, safe_name)
         base, ext = os.path.splitext(path)
         k = 1
         while os.path.exists(path):
@@ -891,10 +895,10 @@ class MqttBackend:
             os.replace(tmp, path)
         except Exception:
             self._cleanup_part(tmp)
-            self._fire_file(r["room"], "error", {"name": r["name"], "msg": "保存文件失败"})
+            self._fire_file(r["room"], "error", {"name": safe_name, "msg": "保存文件失败"})
             return
         self._fire_file(r["room"], "done", {
-            "name": r["name"], "path": path, "size": r["size"],
+            "name": safe_name, "path": path, "size": r["size"],
             "mime": r["mime"], "sname": r.get("sname", "对方"),
         })
 

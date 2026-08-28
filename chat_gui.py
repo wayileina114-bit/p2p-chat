@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -113,6 +113,8 @@ OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
 PRESENCE_TTL = 120.0             # 在线名单过期时间（秒），超时视为下线（兜底 will 丢失）
 MAX_TEXT = 10000                 # 单条文字消息长度上限（防异常/恶意超长消息撑爆界面）
+RECALL_WINDOW = 120             # 撤回时间窗（秒）：发送后 2 分钟内可撤回（QQ 同规则）
+EDIT_WINDOW = 300               # 编辑时间窗（秒）：发送后 5 分钟内可编辑
 
 FONT = "Microsoft YaHei UI"
 HINT = "输入文字，回车发送；也可直接把图片 / 文件拖到这里"
@@ -5442,6 +5444,22 @@ class ChatApp:
         s = self._sessions.get(self._current)
         if s is None:
             return
+        # 限时校验：仅自己的消息且发送 5 分钟内可编辑
+        _tgt = None
+        for m in s.get("messages", []):
+            if m.get("mid") == mid:
+                _tgt = m
+                break
+        if _tgt is None or not _tgt.get("mine"):
+            self._set_status("只能编辑自己发送的消息", "err")
+            return
+        try:
+            _age = time.time() - float(_tgt.get("ts") or 0)
+        except Exception:
+            _age = 0
+        if _age > EDIT_WINDOW:
+            self._set_status("已超过可编辑时间（仅发送 5 分钟内）", "err")
+            return
         is_dm = s.get("kind") == "dm"
         target = s.get("cid") if is_dm else s.get("room")
         if self.backend.send_edit(target, mid, new_text, is_dm):
@@ -5527,6 +5545,22 @@ class ChatApp:
             return
         s = self._sessions.get(self._current)
         if s is None:
+            return
+        # 限时校验：仅自己的消息且发送 2 分钟内可撤回
+        _tgt = None
+        for m in s.get("messages", []):
+            if m.get("mid") == mid:
+                _tgt = m
+                break
+        if _tgt is None or not _tgt.get("mine"):
+            self._set_status("只能撤回自己发送的消息", "err")
+            return
+        try:
+            _age = time.time() - float(_tgt.get("ts") or 0)
+        except Exception:
+            _age = 0
+        if _age > RECALL_WINDOW:
+            self._set_status("已超过可撤回时间（仅发送 2 分钟内）", "err")
             return
         is_dm = s.get("kind") == "dm"
         target = s.get("cid") if is_dm else s.get("room")
@@ -6273,8 +6307,30 @@ class ChatApp:
             pass
 
     def _message_menu(self, event, text, file_path=None, mine=False, mid=None, name=""):
-        """消息右键菜单：复制 / 引用回复 / 编辑 / 撤回 / （文件消息）打开位置。"""
+        """消息右键菜单：复制 / 转发 / 回应 / 置顶 / 编辑 / 撤回。
+
+        编辑 / 撤回规则（像 QQ）：只能操作自己发的消息，
+        且发送后有时间窗限制（撤回 2 分钟内、编辑 5 分钟内）。"""
         try:
+            # 反查消息获取时间戳（用于限时判断）
+            mts = None
+            if mid:
+                s = self._sessions.get(self._current)
+                if s:
+                    for m in s["messages"]:
+                        if m.get("mid") == mid:
+                            mts = m.get("ts")
+                            break
+            age = 0.0
+            try:
+                if mts:
+                    age = time.time() - float(mts)
+            except Exception:
+                age = 0.0
+            can_recall = bool(mine and mid and age <= RECALL_WINDOW)
+            can_edit = bool(mine and mid and age <= EDIT_WINDOW)
+            is_mine_old = bool(mine and mid and age > RECALL_WINDOW)
+
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
@@ -6287,9 +6343,14 @@ class ChatApp:
                 menu.add_cascade(label="回应", menu=react_menu)
                 menu.add_command(label=("取消置顶" if self._is_pinned(mid) else "置顶"),
                                  command=lambda: self._toggle_pin(mid))
-            if mid:
+            if can_edit:
                 menu.add_command(label="编辑", command=lambda: self._edit_message_dialog(mid, text))
+            if can_recall:
                 menu.add_command(label="撤回", command=lambda: self._do_recall(mid))
+            if is_mine_old and mine:
+                menu.add_command(label="撤回（超时，仅 2 分钟内）", state="disabled")
+            if not mine and mid:
+                menu.add_command(label="编辑/撤回（仅自己的消息）", state="disabled")
             if file_path:
                 menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(file_path))
                 menu.add_command(label="复制路径", command=lambda: self._copy_to_clipboard(file_path))

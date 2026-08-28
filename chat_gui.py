@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -409,8 +409,12 @@ def _make_thumb_base64(path, max_size=240, quality=62):
         import base64
         import io
         from PIL import Image
+        Image.MAX_IMAGE_PIXELS = None  # 允许超大原图（手机照片/全景）也能出缩略图
         img = Image.open(path)
-        img.load()
+        try:
+            img.draft("RGB", (max_size * 2, max_size * 2))  # JPEG 先降采样，加速解码
+        except Exception:
+            pass
         img = img.convert("RGB")
         img.thumbnail((max_size, max_size))
         buf = io.BytesIO()
@@ -439,6 +443,58 @@ def _play_notify_sound():
         winsound.MessageBeep(winsound.MB_ICONASTERISK)
     except Exception:
         pass
+
+
+def _notify_windows(title, msg):
+    """Windows 原生气泡/吐司通知（Shell_NotifyIcon，无第三方依赖）。
+    失败静默返回 False，调用方回退到任务栏闪烁。"""
+    if os.name != "nt":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID(ctypes.Structure):
+            _fields_ = [("d1", wintypes.DWORD), ("d2", wintypes.WORD),
+                        ("d3", wintypes.WORD), ("d4", ctypes.c_ubyte * 8)]
+
+        class _NID(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("hWnd", wintypes.HWND),
+                ("uID", wintypes.UINT),
+                ("uFlags", wintypes.UINT),
+                ("uCallbackMessage", wintypes.UINT),
+                ("hIcon", wintypes.HICON),
+                ("szTip", ctypes.c_wchar * 128),
+                ("dwState", wintypes.DWORD),
+                ("dwStateMask", wintypes.DWORD),
+                ("szInfo", ctypes.c_wchar * 256),
+                ("uTimeout", wintypes.UINT),
+                ("szInfoTitle", ctypes.c_wchar * 64),
+                ("dwInfoFlags", wintypes.DWORD),
+                ("guidItem", _GUID),
+                ("hBalloonIcon", wintypes.HICON),
+            ]
+
+        shell32 = ctypes.windll.shell32
+        user32 = ctypes.windll.user32
+        nid = _NID()
+        nid.cbSize = ctypes.sizeof(_NID)
+        nid.uID = 0x1234
+        nid.uFlags = 0x10  # NIF_INFO
+        nid.szInfo = str(msg)[:255]
+        nid.szInfoTitle = str(title)[:63]
+        nid.dwInfoFlags = 0x1  # NIIF_INFO
+        nid.uTimeout = 10000
+        # 带一个系统信息图标，保证托盘区有可显示气泡的图标
+        nid.uFlags |= 0x2  # NIF_ICON
+        nid.hIcon = user32.LoadIconW(None, 32516)  # IDI_INFORMATION
+        shell32.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD（首次即弹出气泡）
+        shell32.Shell_NotifyIconW(1, ctypes.byref(nid))  # NIM_MODIFY（确保弹出）
+        return True
+    except Exception:
+        return False
 
 
 def _load_rooms():
@@ -1407,15 +1463,17 @@ class MqttBackend:
 
 
 def _ver_parts(v):
-    """把版本号字符串转成数字元组（如 2.1.0 -> (2,1,0)），便于比较排序。"""
+    """把版本号字符串转成数字元组（如 2.1.0 / v2.1.0 -> (2,1,0)），便于比较排序。
+    每段开头可能带非数字前缀（如 GitHub tag 的 "v"），需要跳过而不是当 0。"""
     out = []
     for tok in str(v).split("."):
         num = ""
-        for ch in tok:
-            if ch.isdigit():
-                num += ch
-            else:
-                break
+        i = 0
+        while i < len(tok) and not tok[i].isdigit():
+            i += 1
+        while i < len(tok) and tok[i].isdigit():
+            num += tok[i]
+            i += 1
         out.append(int(num) if num else 0)
     while len(out) < 3:
         out.append(0)
@@ -1424,7 +1482,7 @@ def _ver_parts(v):
 
 class ChatApp:
     FEED_MAX = 400         # 每个会话持久化的历史消息上限
-    RENDER_MAX = 50        # 切换会话时最多立即渲染的消息条数（更早的折叠；降低以提速渲染）
+    RENDER_MAX = 200       # 切换会话时最多立即渲染的消息条数（更早的折叠；放开以换取流畅）
     GROUP_GAP = 300        # 同一发送者连续消息合并的间隔（秒，5 分钟）
 
     GROUP_PREFIX = "room|"
@@ -1451,6 +1509,8 @@ class ChatApp:
         self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
         self._search_query = ""      # 会话内消息搜索关键词（空 = 未搜索）
         self._msg_search_after = None  # 消息搜索防抖 timer id
+        self._suppress_auto_scroll = False  # 全量渲染时抑制逐条自动滚动，避免布局抖动/残影
+        self._window_focused = True    # 窗口是否聚焦（后台/最小化时不聚焦，用于弹通知）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1497,6 +1557,20 @@ class ChatApp:
         top = ctk.CTkFrame(self.root, corner_radius=0, fg_color=C("panel"))
         top.pack(fill="x")
 
+        # 右侧按钮（检查更新 / 主题）先占位：pack 顺序靠前，窗口较窄时也
+        # 优先保留它们的空间，避免被左侧较宽的控件（昵称/房间/加入/连接）挤掉点不到。
+        self.update_btn = ctk.CTkButton(top, text="🔄", width=40, height=32, corner_radius=8,
+                                          fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                          text_color=C("text_2"), font=(FONT, 14),
+                                          command=self._manual_check_update)
+        self.update_btn.pack(side="right", padx=(0, 8), pady=12)
+        self.theme_btn = ctk.CTkButton(top, text=("☀️" if self.appearance == "dark" else "🌙"),
+                                        width=40, height=32, corner_radius=8,
+                                        fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                        text_color=C("text_2"), font=(FONT, 14),
+                                        command=self._toggle_theme)
+        self.theme_btn.pack(side="right", padx=(0, 12), pady=12)
+
         self.top_avatar = ctk.CTkLabel(top, text="", width=34, height=34,
                                        corner_radius=17, fg_color=C("input_bg"), cursor="hand2")
         self.top_avatar.pack(side="left", padx=(14, 6), pady=12)
@@ -1539,19 +1613,6 @@ class ChatApp:
                                          fg_color=C("accent"), hover_color=C("accent_hover"),
                                          command=self._toggle_connect)
         self.connect_btn.pack(side="left", pady=12, padx=(0, 8))
-
-        self.update_btn = ctk.CTkButton(top, text="🔄", width=36, height=32, corner_radius=8,
-                                         fg_color=C("input_bg"), hover_color=C("input_hover"),
-                                         text_color=C("text_2"), font=(FONT, 14),
-                                         command=self._manual_check_update)
-        self.update_btn.pack(side="right", padx=(0, 8), pady=12)
-
-        self.theme_btn = ctk.CTkButton(top, text=("☀️" if self.appearance == "dark" else "🌙"),
-                                       width=36, height=32, corner_radius=8,
-                                       fg_color=C("input_bg"), hover_color=C("input_hover"),
-                                       text_color=C("text_2"), font=(FONT, 14),
-                                       command=self._toggle_theme)
-        self.theme_btn.pack(side="right", padx=(0, 12), pady=12)
 
         # 状态栏
         self.status_var = ctk.StringVar(value="未连接")
@@ -1634,6 +1695,9 @@ class ChatApp:
         # Ctrl+F 打开会话内消息搜索
         self.root.bind("<Control-f>", self._open_search)
         self.root.bind("<Control-F>", self._open_search)
+        # 焦点跟踪：后台/最小化时收到新消息弹 Windows 通知
+        self.root.bind("<FocusIn>", lambda e: setattr(self, "_window_focused", True))
+        self.root.bind("<FocusOut>", lambda e: setattr(self, "_window_focused", False))
 
         btncol = ctk.CTkFrame(ibar, fg_color="transparent")
         btncol.pack(side="right", padx=(0, 14), pady=14)
@@ -1763,7 +1827,7 @@ class ChatApp:
                 self.root.after_cancel(self._search_after)
             except Exception:
                 pass
-        self._search_after = self.root.after(120, self._apply_session_list)
+        self._search_after = self.root.after(60, self._apply_session_list)
 
     def _schedule_session_list(self):
         """合并短时间内的多次列表重建（presence 连串更新时避免抖动）。"""
@@ -1772,7 +1836,7 @@ class ChatApp:
                 self.root.after_cancel(self._list_after)
             except Exception:
                 pass
-        self._list_after = self.root.after(250, self._apply_session_list)
+        self._list_after = self.root.after(100, self._apply_session_list)
 
     def _open_downloads(self):
         try:
@@ -2219,6 +2283,20 @@ class ChatApp:
         except Exception:
             pass
 
+    def _maybe_notify(self, s, name, text, mine, system):
+        """后台/非当前会话收到新消息时弹 Windows 通知；前台正在看时静默。"""
+        if mine or system:
+            return
+        if s["key"] == self._current and self._window_focused:
+            return
+        try:
+            title = str(s.get("name") or "新消息")
+            who = str(name or "对方")
+            preview = (text or "").strip().replace("\n", " ")[:80] or "（图片/文件）"
+            _notify_windows(f"{title} · {who}", preview)
+        except Exception:
+            pass
+
     def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False, mid=None, preview_tid=None):
         s = self._sessions.get(key)
         if s is None:
@@ -2238,6 +2316,7 @@ class ChatApp:
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
         self._save_session(s)
+        self._maybe_notify(s, name, text, mine, system)
         if not mine and self.notify_sound and not system:
             _play_notify_sound()
         if key == self._current:
@@ -2925,6 +3004,8 @@ class ChatApp:
         """新内容到达时，仅当用户此前已贴底才自动滚动，避免打断向上翻阅历史。
         必须在内容 append 前调用 _at_bottom() 记录 _stick_bottom，否则新内容已把
         视口顶出底部，会误判成“用户在上翻”。"""
+        if self._suppress_auto_scroll:
+            return
         def _do():
             try:
                 canvas = self.feed._parent_canvas
@@ -3082,7 +3163,12 @@ class ChatApp:
             ctk_img = self._thumb_cache.get(cache_key)
             if ctk_img is None:
                 from PIL import Image  # 惰性加载
+                Image.MAX_IMAGE_PIXELS = None  # 允许超大原图也能渲染缩略图
                 img = Image.open(path)
+                try:
+                    img.draft("RGB", (560, 560))  # JPEG 先降采样，加速解码
+                except Exception:
+                    pass
                 img.load()  # 强制解码，损坏图片这里会失败而非渲染时崩溃
                 if img.mode not in ("RGB", "RGBA"):
                     img = img.convert("RGB")
@@ -3207,6 +3293,7 @@ class ChatApp:
             lbl.bind("<Button-1>", lambda e: self._expand_history())
             msgs = msgs[-self.RENDER_MAX:]
         last_day = None
+        self._suppress_auto_scroll = True  # 全量渲染：逐条 auto-scroll 交给末尾一次 _scroll_bottom
         for idx, m in enumerate(msgs):
             ts = m.get("ts")
             dlabel = _day_label(ts) if ts else ""
@@ -3225,6 +3312,7 @@ class ChatApp:
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),
                                  mid=m.get("mid"), recalled=m.get("recalled"),
                                  recalled_by=m.get("recalled_by"))
+        self._suppress_auto_scroll = False
         if self._search_query:
             self._scroll_top()
         else:
@@ -3338,7 +3426,12 @@ class ImagePreview:
             return
         try:
             from PIL import Image  # 惰性加载
+            Image.MAX_IMAGE_PIXELS = None  # 允许超大原图也能放大预览
             img = Image.open(path)
+            try:
+                img.draft("RGB", (1640, 1200))
+            except Exception:
+                pass
             img.load()  # 强制解码，损坏图片这里会失败而非渲染时崩溃
             if img.mode not in ("RGB", "RGBA", "L"):
                 img = img.convert("RGB")

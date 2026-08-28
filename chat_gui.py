@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.11"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.12"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -731,13 +731,23 @@ class MqttBackend:
         self._fire_peers()
 
     def _prune_loop(self):
-        """后台周期性清理过期在线条目（每 30 秒一次）。"""
+        """后台心跳 + 清理：每 30 秒重新发布自己的在线状态（保活）并清理过期条目。
+
+        若只靠上线时发布一次 presence，长时间静默的活跃用户会被 PRESENCE_TTL
+        误判为下线；这里周期性刷新自己的 ts，保证「活跃即在线」，只有真正停止
+        心跳的离线者才会被 TTL 清掉。
+        """
         while self.running:
             time.sleep(30)
             if not self.running:
                 break
             try:
                 self._prune_presence()
+            except Exception:
+                pass
+            try:
+                if self.online and self._client is not None:
+                    self._publish_presence()
             except Exception:
                 pass
 

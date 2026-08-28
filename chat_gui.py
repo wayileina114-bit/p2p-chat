@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.7.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.7.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -132,10 +132,31 @@ def collect_env_report():
 
 
 def _base_dir():
-    """数据根目录：打包后 = exe 所在目录；源码运行 = 脚本所在目录。"""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
+    """数据根目录：优先 exe/脚本 所在目录（便携）；不可写时退回 APPDATA 下的 P2P聊天目录。
+
+    安装版默认装到 Program Files（普通用户只读），若仍往 exe 目录写历史/头像会失败，
+    表现为「头像读取失败、ID 每次变化、聊天记录不保存」。所以这里做可写性探测 + 回退。
+    """
+    base = (os.path.dirname(os.path.abspath(sys.executable))
+            if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__)))
+    try:
+        probe = os.path.join(base, ".p2pchat_write_test")
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+        return base
+    except Exception:
+        pass
+    appdata = (os.environ.get("APPDATA")
+               or os.environ.get("LOCALAPPDATA")
+               or os.path.expanduser("~"))
+    d = os.path.join(appdata, "P2P聊天")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        pass
+    return d
 
 
 DATA_DIR = os.path.join(_base_dir(), "history")      # 历史 + 身份 + 房间列表

@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2666,6 +2666,7 @@ class ChatApp:
                 pass
         s = self._sessions[key]
         s["unread"] = 0
+        s["@me"] = False
         self._update_chat_title()
         self._reset_input_hint()
         self._render_feed()
@@ -2864,6 +2865,9 @@ class ChatApp:
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
         if unread:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 6))
+        if s and s.get("@me"):
+            ctk.CTkLabel(row, text="@", text_color=C("accent"),
+                         font=(FONT, 11, "bold"), cursor="hand2").pack(side="right", padx=(0, 6))
         cross = ctk.CTkLabel(row, text="✕", width=24, text_color=C("text_mute"), cursor="hand2")
         cross.pack(side="right", padx=(0, 6))
         for w in [row, hash_lbl] + list(mid.winfo_children()):
@@ -2895,6 +2899,9 @@ class ChatApp:
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
         if unread:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 10))
+        if s.get("@me"):
+            ctk.CTkLabel(row, text="@", text_color=C("accent"),
+                         font=(FONT, 11, "bold"), cursor="hand2").pack(side="right", padx=(0, 6))
         for w in [row, dot] + list(mid.winfo_children()):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
             w.bind("<Button-3>", lambda e, s=s: self._dm_context_menu(e, s))
@@ -2982,6 +2989,8 @@ class ChatApp:
             title = str(s.get("name") or "新消息")
             who = str(name or "对方")
             preview = (text or "").strip().replace("\n", " ")[:80] or "（图片/文件）"
+            if self._mentions_me(text):
+                title = f"📢 @我 · {title}"
             _notify_windows(f"{title} · {who}", preview)
         except Exception:
             pass
@@ -3010,6 +3019,10 @@ class ChatApp:
             s["messages"] = s["messages"][-self.FEED_MAX:]
         self._save_session(s)
         self._maybe_notify(s, name, text, mine, system)
+        if not mine and not system and self._mentions_me(text):
+            s["@me"] = True
+            if key != self._current:
+                self._schedule_session_list()
         if not mine and self.notify_sound and not system and not self._dnd:
             _play_notify_sound()
         if key == self._current:
@@ -3504,6 +3517,19 @@ class ChatApp:
         for path in paths:
             if path and os.path.isfile(path):
                 self._do_send_file(path)
+
+    def _toggle_voice_play(self, path):
+        """点击语音气泡：播放；再点停止。"""
+        if getattr(self, "_playing_voice", None) == path:
+            try:
+                import winsound
+                winsound.PlaySound(None, winsound.SND_PURGE)
+            except Exception:
+                pass
+            self._playing_voice = None
+            return
+        self._playing_voice = path
+        _play_voice(path)
 
     def _start_voice(self):
         """按住说话：开始录音。"""
@@ -4366,7 +4392,7 @@ class ChatApp:
         ctk.CTkButton(bubble, text=f"🎤 语音 {dur_txt}", width=130, height=36, corner_radius=16,
                       fg_color=C("input_bg"), text_color=C("text"),
                       hover_color=C("input_hover"), font=(FONT, 12),
-                      command=lambda p=path: _play_voice(p)).pack(anchor="w", padx=12, pady=6)
+                      command=lambda p=path: self._toggle_voice_play(p)).pack(anchor="w", padx=12, pady=6)
         self._maybe_scroll_bottom()
         self._trim_feed()
 

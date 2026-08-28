@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.6.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.7.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -976,14 +976,21 @@ class ChatApp:
                                        corner_radius=15, fg_color="#e2e6ee", cursor="hand2")
         self.top_avatar.pack(side="left", padx=(14, 4), pady=14)
         self._render_top_avatar()
-        self.top_avatar.bind("<Button-1>", lambda e: self._open_profile())
+        self.top_avatar.bind("<Button-1>", lambda e: self._change_avatar())
 
         ctk.CTkLabel(top, text="昵称", text_color="#5b6372", font=(FONT, 12)).pack(side="left", padx=(0, 6), pady=14)
         self.nick_var = ctk.StringVar(value=self._profile_name)
         self.nick_var.trace_add("write", lambda *_: self._on_nick_changed())
         ctk.CTkEntry(top, textvariable=self.nick_var, width=104, height=34,
                      corner_radius=10, border_width=0, fg_color="#f2f4f8",
-                     font=(FONT, 12)).pack(side="left", padx=(0, 14), pady=14)
+                     font=(FONT, 12)).pack(side="left", padx=(0, 8), pady=14)
+
+        # 用户 ID（点击复制，主界面内即可查看）
+        self.id_btn = ctk.CTkButton(top, text="📋 复制ID", width=82, height=34,
+                                    corner_radius=10, fg_color="#f2f4f8",
+                                    text_color="#1f6feb", hover_color="#e6edfb",
+                                    font=(FONT, 11), command=self._copy_my_id)
+        self.id_btn.pack(side="left", padx=(0, 8), pady=14)
 
         ctk.CTkLabel(top, text="房间", text_color="#5b6372", font=(FONT, 12)).pack(side="left", padx=(0, 6), pady=14)
         self.room_var = ctk.StringVar(value="")
@@ -1110,15 +1117,30 @@ class ChatApp:
         else:
             self.top_avatar.configure(image=None, text="", fg_color="#e2e6ee")
 
-    def _open_profile(self):
-        # 重新打开资料卡（改头像/昵称）
-        dlg = LoginDialog(self.root)
-        self.root.wait_window(dlg.top)
-        if dlg.ok:
-            self._profile_name = dlg.name
-            self._avatar = dlg.avatar
-            self.nick_var.set(dlg.name)
+    def _change_avatar(self):
+        # 直接在主界面换头像，不再弹独立登录框
+        path = filedialog.askopenfilename(
+            title="选择头像",
+            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("所有文件", "*.*")])
+        if not path:
+            return
+        saved = _copy_avatar(path)
+        if saved:
+            self._avatar = saved
+            self._profile_name = self.nick_var.get().strip() or "未命名"
+            _save_profile(self._profile_name, self._avatar)
             self._render_top_avatar()
+            self._set_status("头像已更新", "#1a7f37")
+        else:
+            messagebox.showerror("头像", "读取该图片失败，请换一张试试。")
+
+    def _copy_my_id(self):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self.cid)
+            self._set_status("已复制用户 ID：" + self.cid, "#1a7f37")
+        except Exception:
+            pass
 
     def _show_about(self):
         AboutDialog(self.root)
@@ -1144,7 +1166,8 @@ class ChatApp:
                     body = (str(data.get("body", "")).strip()
                             .replace("\r\n", "\n").replace("\r", "\n"))
                     notes = data.get("html_url", "")
-                    self.root.after(0, lambda: self._prompt_update(latest, body, notes))
+                    dl = self._pick_asset_url(data)
+                    self.root.after(0, lambda: self._prompt_update(latest, body, notes, dl))
             except Exception:
                 pass  # 检查失败静默忽略，不打扰用户
 
@@ -1171,12 +1194,59 @@ class ChatApp:
             cp.append(0)
         return lp > cp
 
-    def _prompt_update(self, latest, body, notes):
+    @staticmethod
+    def _pick_asset_url(data):
+        """从 GitHub release 数据里挑出安装包（P2PChat-Setup.exe）的下载地址。"""
         try:
-            dlg = UpdateDialog(self.root, latest, body, notes)
+            for a in (data.get("assets") or []):
+                n = str(a.get("name", "")).lower()
+                if n.endswith(".exe") and "setup" in n:
+                    return str(a.get("browser_download_url", ""))
+        except Exception:
+            pass
+        return ""
+
+    def _prompt_update(self, latest, body, notes, download_url=""):
+        try:
+            dlg = UpdateDialog(self.root, latest, body, notes, download_url,
+                               download_cb=None if not download_url else
+                               (lambda u=download_url: self._download_and_run_installer(u)))
             self.root.wait_window(dlg.top)
         except Exception:
             pass
+
+    def _download_and_run_installer(self, url):
+        """后台下载新的安装包到本地，完成后启动它（自动升级，无需手动换安装包）。"""
+        import urllib.request
+
+        def work():
+            dest = os.path.join(_base_dir(), "P2PChat-Setup-new.exe")
+            self.root.after(0, lambda: self._set_status("正在下载新版本安装包…", "#9aa0ab"))
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "P2PChat-App", "Accept": "application/octet-stream"})
+                with urllib.request.urlopen(req, timeout=180) as r, open(dest, "wb") as f:
+                    while True:
+                        chunk = r.read(65536)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                self.root.after(0, lambda: self._run_installer(dest))
+            except Exception as e:
+                self.root.after(0, lambda e=e: self._set_status(
+                    "下载失败：" + str(e), "#c0392b"))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _run_installer(self, path):
+        try:
+            self._set_status("下载完成，即将启动安装程序…", "#1a7f37")
+            if os.name == "nt":
+                os.startfile(path)
+            else:
+                subprocess = __import__("subprocess")
+                subprocess.Popen(["xdg-open", path])
+        except Exception:
+            self._set_status("已下载到：" + path + "（请手动运行）", "#c0392b")
 
     def _manual_check_update(self):
         """手动检查更新：带明确结果反馈（已最新 / 发现新版 / 失败）。"""
@@ -1197,7 +1267,8 @@ class ChatApp:
                     body = (str(data.get("body", "")).strip()
                             .replace("\r\n", "\n").replace("\r", "\n"))
                     notes = data.get("html_url", "")
-                    self.root.after(0, lambda: self._prompt_update(latest, body, notes))
+                    dl = self._pick_asset_url(data)
+                    self.root.after(0, lambda: self._prompt_update(latest, body, notes, dl))
                 else:
                     self.root.after(0, lambda: self._set_status(
                         f"已是最新版本 v{APP_VERSION}", "#1a7f37"))
@@ -1509,8 +1580,11 @@ class ChatApp:
                 pass
 
     def _on_nick_changed(self):
+        name = self.nick_var.get().strip() or "未命名"
+        self._profile_name = name
+        _save_profile(name, self._avatar)
         if self.backend and self.backend.running:
-            self.backend.change_nick(self.nick_var.get().strip())
+            self.backend.change_nick(name)
 
     def _toggle_connect(self):
         if self.backend and self.backend.running:
@@ -2073,11 +2147,11 @@ class AboutDialog:
 class UpdateDialog:
     """发现新版本时的提示框：展示版本号 / 更新内容 / 跳转下载。"""
 
-    def __init__(self, master, latest, body, notes):
+    def __init__(self, master, latest, body, notes, download_url="", download_cb=None):
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("发现新版本")
-        top.geometry("480x460")
+        top.geometry("480x480")
         top.resizable(False, False)
         top.transient(master)
         top.configure(fg_color="#f5f7fb")
@@ -2111,13 +2185,28 @@ class UpdateDialog:
 
         btnrow = ctk.CTkFrame(top, fg_color="transparent")
         btnrow.pack(fill="x", padx=24, pady=(0, 24))
-        ctk.CTkButton(btnrow, text="前往下载", height=40, corner_radius=12,
-                      font=(FONT, 13, "bold"),
-                      command=lambda: self._open(notes or f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}/releases")
-                      ).pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ctk.CTkButton(btnrow, text="稍后", width=90, height=40, corner_radius=12,
-                      fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
-                      font=(FONT, 12), command=top.destroy).pack(side="right")
+        web_url = notes or f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}/releases"
+
+        def _do_download():
+            self.top.destroy()
+            if download_cb:
+                download_cb()
+
+        if download_cb:
+            ctk.CTkButton(btnrow, text="下载并安装", height=40, corner_radius=12,
+                          font=(FONT, 13, "bold"), command=_do_download
+                          ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+            ctk.CTkButton(btnrow, text="前往网页", width=90, height=40, corner_radius=12,
+                          fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
+                          font=(FONT, 12), command=lambda: self._open(web_url)
+                          ).pack(side="right")
+        else:
+            ctk.CTkButton(btnrow, text="前往下载", height=40, corner_radius=12,
+                          font=(FONT, 13, "bold"), command=lambda: self._open(web_url)
+                          ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+            ctk.CTkButton(btnrow, text="稍后", width=90, height=40, corner_radius=12,
+                          fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
+                          font=(FONT, 12), command=top.destroy).pack(side="right")
 
     def _open(self, url):
         import webbrowser
@@ -2125,117 +2214,6 @@ class UpdateDialog:
             webbrowser.open(url)
         except Exception:
             pass
-        self.top.destroy()
-
-
-class LoginDialog:
-    """启动登录 / 资料卡：设置头像 + 昵称，展示并复制自己的用户 ID。"""
-
-    def __init__(self, master):
-        self.master = master
-        self.ok = False
-        self.profile = _load_profile()
-        self.name = self.profile["name"]
-        self.avatar = self.profile["avatar"]
-        self.cid = self.profile["cid"]
-
-        top = ctk.CTkToplevel(master)
-        self.top = top
-        top.title("登录 · P2P 聊天")
-        top.geometry("460x540")
-        top.resizable(False, False)
-        top.transient(master)
-        top.configure(fg_color="#f5f7fb")
-        try:
-            top.grab_set()
-        except Exception:
-            pass
-        top.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        ctk.CTkLabel(top, text="P2P 聊天", font=(FONT, 22, "bold"),
-                     text_color="#1d1d1f").pack(pady=(22, 2))
-        ctk.CTkLabel(top, text="设置头像与昵称，即可进入聊天",
-                     font=(FONT, 12), text_color="#8a8f99").pack(pady=(0, 10))
-
-        # 头像（紧凑居中）
-        self.thumb = ctk.CTkLabel(top, text="", width=88, height=88,
-                                  corner_radius=44, fg_color="#e2e6ee")
-        self.thumb.pack()
-        self._render_avatar()
-        ctk.CTkButton(top, text="更换头像", width=110, height=28, corner_radius=14,
-                      font=(FONT, 11), fg_color="#3a4150", hover_color="#2c323e",
-                      command=self._choose_avatar).pack(pady=(6, 10))
-
-        # 昵称
-        ctk.CTkLabel(top, text="昵称", anchor="w", font=(FONT, 12, "bold"),
-                     text_color="#5b6372").pack(anchor="w", padx=56, pady=(2, 4))
-        self.name_var = ctk.StringVar(value=self.name)
-        self.name_entry = ctk.CTkEntry(top, textvariable=self.name_var, height=38,
-                                       corner_radius=12, border_width=0,
-                                       fg_color="#ffffff", font=(FONT, 13),
-                                       placeholder_text="输入你的昵称")
-        self.name_entry.pack(fill="x", padx=56)
-
-        # 用户 ID
-        ctk.CTkLabel(top, text="用户 ID", anchor="w", font=(FONT, 12, "bold"),
-                     text_color="#5b6372").pack(anchor="w", padx=56, pady=(10, 4))
-        id_row = ctk.CTkFrame(top, fg_color="#ffffff", corner_radius=12)
-        id_row.pack(fill="x", padx=56)
-        ctk.CTkLabel(id_row, text=self.cid, text_color="#1f6feb",
-                     font=("Consolas", 11), anchor="w",
-                     wraplength=210).pack(side="left", fill="x", expand=True, padx=12, pady=9)
-        self.copy_btn = ctk.CTkButton(id_row, text="复制", width=56, height=26, corner_radius=8,
-                                      font=(FONT, 11), command=self._copy_id)
-        self.copy_btn.pack(side="right", padx=6)
-
-        # 进入按钮（底部固定；固定窗口高度已预留充足余量，按钮不会溢出）
-        ctk.CTkButton(top, text="进入聊天", height=44, corner_radius=12,
-                      font=(FONT, 14, "bold"), command=self._enter
-                      ).pack(fill="x", padx=56, pady=(16, 18))
-
-        if self.name:
-            self.name_entry.focus_set()
-            self.name_entry.icursor("end")
-
-    def _render_avatar(self):
-        img = _load_ctk_image(self.avatar, 88, 88) if self.avatar else None
-        if img is not None:
-            self.thumb.configure(image=img, text="")
-            self._img_ref = img
-        else:
-            self.thumb.configure(image=None, text="头像", text_color="#9aa0ab",
-                                 font=(FONT, 14, "bold"))
-
-    def _choose_avatar(self):
-        path = filedialog.askopenfilename(
-            title="选择头像",
-            filetypes=[("图片文件", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"), ("所有文件", "*.*")])
-        if not path:
-            return
-        saved = _copy_avatar(path)
-        if saved:
-            self.avatar = saved
-            self._render_avatar()
-        else:
-            messagebox.showerror("头像", "读取该图片失败，请换一张试试。")
-
-    def _copy_id(self):
-        try:
-            self.top.clipboard_clear()
-            self.top.clipboard_append(self.cid)
-            self.copy_btn.configure(text="已复制")
-            self.top.after(1500, lambda: self.copy_btn.configure(text="复制"))
-        except Exception:
-            pass
-
-    def _enter(self):
-        self.name = self.name_var.get().strip() or "未命名"
-        _save_profile(self.name, self.avatar)
-        self.ok = True
-        self.top.destroy()
-
-    def _on_close(self):
-        self.ok = False
         self.top.destroy()
 
 
@@ -2269,29 +2247,97 @@ def _ensure_deps():
     return False
 
 
+def _crash_log_path():
+    """崩溃日志写到用户可写的本地目录（Program Files 可能只读）。"""
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or _base_dir()
+    d = os.path.join(base, "P2PChat")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        d = _base_dir()
+    return os.path.join(d, "crash.log")
+
+
+def _write_crash(etype, value, tb):
+    try:
+        import traceback
+        p = _crash_log_path()
+        with open(p, "a", encoding="utf-8") as f:
+            f.write("\n=== %s ===\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            f.write("".join(traceback.format_exception(etype, value, tb)))
+            f.write("\n")
+        return p
+    except Exception:
+        return ""
+
+
+def _notify_crash(path):
+    try:
+        import tkinter as tk
+        from tkinter import messagebox
+        r = tk.Tk()
+        r.withdraw()
+        messagebox.showerror(
+            "程序出错",
+            "程序遇到错误，详细信息已写入：\n%s\n\n请把这份日志反馈给开发者以便修复。" % (path or "（无法写入日志）"))
+        r.destroy()
+    except Exception:
+        pass
+
+
+def _install_excepthook():
+    """把未捕获异常写到日志并弹窗，避免 --windowed 打包后静默闪退、无从排查。"""
+
+    def hook(etype, value, tb):
+        p = _write_crash(etype, value, tb)
+        _notify_crash(p)
+        try:
+            sys.__excepthook__(etype, value, tb)
+        except Exception:
+            pass
+
+    sys.excepthook = hook
+    try:
+        def thook(args):
+            tb = getattr(args, "exc_traceback", None)
+            p = _write_crash(args.exc_type, args.exc_value, tb)
+            _notify_crash(p)
+        threading.excepthook = thook
+    except Exception:
+        pass
+
+
+def _report_callback_exception(self, etype, value, tb):
+    # 替换 tkinter 的默认回调异常处理，落日志而不是静默闪退
+    p = _write_crash(etype, value, tb)
+    _notify_crash(p)
+
+
 def main():
     global _DND_READY
+    _install_excepthook()
     if not _ensure_deps():
         return
     ctk.set_appearance_mode("light")
     ctk.set_default_color_theme("blue")
-    root = ctk.CTk()
-    if _HAS_DND:
-        try:
-            TkinterDnD.require(root)
-            _DND_READY = True
-        except Exception:
-            _DND_READY = False
-    root.withdraw()  # 先隐藏主窗口，弹登录框
-    login = LoginDialog(root)
-    root.wait_window(login.top)
-    if not login.ok:
-        root.destroy()
-        return
-    root.deiconify()
-    app = ChatApp(root, profile=login.profile, name=login.name, avatar=login.avatar)
-    app.check_for_update()          # 进入主界面后后台静默检查更新
-    root.mainloop()
+    try:
+        root = ctk.CTk()
+        if _HAS_DND:
+            try:
+                TkinterDnD.require(root)
+                _DND_READY = True
+            except Exception:
+                _DND_READY = False
+        root.report_callback_exception = _report_callback_exception
+        # 单窗口：直接进入主界面，头像/昵称/ID 都在主界面内设置，不再有独立登录层
+        profile = _load_profile()
+        app = ChatApp(root, profile=profile, name=profile["name"], avatar=profile["avatar"])
+        app.check_for_update()          # 后台静默检查更新
+        root.mainloop()
+    except Exception:
+        p = _write_crash(*sys.exc_info())
+        _notify_crash(p)
+        raise
 
 
 if __name__ == "__main__":

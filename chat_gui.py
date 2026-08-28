@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1888,6 +1888,8 @@ class ChatApp:
             view_menu.add_command(label="浅色主题", command=lambda: self._set_theme("light"))
             menubar.add_cascade(label="视图", menu=view_menu)
             settings_menu = tk.Menu(menubar, tearoff=0)
+            settings_menu.add_command(label="设置中心…", command=self._open_settings)
+            settings_menu.add_separator()
             self._auto_conn_var = tk.BooleanVar(value=self.auto_connect)
             settings_menu.add_checkbutton(label="启动时自动连接", variable=self._auto_conn_var,
                                           command=self._toggle_auto_connect)
@@ -1925,6 +1927,56 @@ class ChatApp:
     def _toggle_notify_popup(self):
         self.notify_popup = bool(self._popup_var.get())
         _update_settings("notify_popup", self.notify_popup)
+
+    def _apply_setting(self, key, var, attr):
+        val = bool(var.get())
+        setattr(self, attr, val)
+        _update_settings(key, val)
+
+    def _apply_setting_dnd(self, var):
+        self._dnd = bool(var.get())
+        try:
+            self.dnd_btn.configure(text="🔕" if self._dnd else "🔔")
+        except Exception:
+            pass
+
+    def _open_settings(self):
+        """设置中心对话框：集中管理所有开关与选项。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("设置")
+            win.geometry("430x400")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="设置中心", font=(FONT, 15, "bold"),
+                         text_color=C("text")).pack(pady=(16, 6))
+
+            popup_var = tk.BooleanVar(value=self.notify_popup)
+            ctk.CTkCheckBox(win, text="Windows 通知弹窗", variable=popup_var,
+                            command=lambda: self._apply_setting("notify_popup", popup_var, "notify_popup"),
+                            font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+            sound_var = tk.BooleanVar(value=self.notify_sound)
+            ctk.CTkCheckBox(win, text="新消息提示音", variable=sound_var,
+                            command=lambda: self._apply_setting("notify_sound", sound_var, "notify_sound"),
+                            font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+            auto_var = tk.BooleanVar(value=self.auto_connect)
+            ctk.CTkCheckBox(win, text="启动时自动连接", variable=auto_var,
+                            command=lambda: self._apply_setting("auto_connect", auto_var, "auto_connect"),
+                            font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+            dnd_var = tk.BooleanVar(value=self._dnd)
+            ctk.CTkCheckBox(win, text="免打扰（静音通知+提示音）", variable=dnd_var,
+                            command=lambda: self._apply_setting_dnd(dnd_var),
+                            font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+
+            ctk.CTkButton(win, text="端到端加密口令…", height=32, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text"), hover_color=C("input_hover"),
+                          font=(FONT, 12), command=self._set_encrypt_pass).pack(fill="x", padx=26, pady=6)
+
+            ctk.CTkLabel(win, text=f"P2P 聊天 · v{APP_VERSION}", font=(FONT, 10),
+                         text_color=C("text_mute")).pack(pady=(10, 14))
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
 
     def _set_encrypt_pass(self):
         """设置端到端加密口令：留空则关闭加密。双方需用相同口令才能互看消息。"""

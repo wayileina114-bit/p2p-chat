@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -364,6 +364,13 @@ def _save_settings(d):
             json.dump(d, f, ensure_ascii=False)
     except Exception:
         pass
+
+
+def _update_settings(key, value):
+    """合并更新单个设置项，避免整表覆盖时丢掉其它键。"""
+    d = _load_settings()
+    d[key] = value
+    _save_settings(d)
 
 
 # --------------------------- 历史（按会话） ---------------------------
@@ -1034,6 +1041,7 @@ class ChatApp:
         self._hint_active = True
         self._thumb_cache = {}      # 图片缩略图缓存：path -> CTkImage
         self._search_after = None   # 搜索防抖 timer id
+        self.auto_connect = bool(_load_settings().get("auto_connect", True))
 
         self.root.title("P2P 聊天")
         self.root.geometry("1000x680")
@@ -1060,6 +1068,8 @@ class ChatApp:
         self._render_feed()
         self._set_status("未连接", "mute")
         self._show_system("顶部输入房间名后点「＋ 加入」可加多个房间；点「连接」开始聊天。文字/图片/文件都能发。")
+        if self.auto_connect:
+            self.root.after(400, self._auto_connect_on_startup)
 
     # --------------------------- UI 构建 ---------------------------
 
@@ -1197,6 +1207,11 @@ class ChatApp:
             view_menu.add_command(label="深色主题", command=lambda: self._set_theme("dark"))
             view_menu.add_command(label="浅色主题", command=lambda: self._set_theme("light"))
             menubar.add_cascade(label="视图", menu=view_menu)
+            settings_menu = tk.Menu(menubar, tearoff=0)
+            self._auto_conn_var = tk.BooleanVar(value=self.auto_connect)
+            settings_menu.add_checkbutton(label="启动时自动连接", variable=self._auto_conn_var,
+                                          command=self._toggle_auto_connect)
+            menubar.add_cascade(label="设置", menu=settings_menu)
             help_menu = tk.Menu(menubar, tearoff=0)
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
@@ -1208,6 +1223,17 @@ class ChatApp:
         except Exception:
             pass
 
+    def _toggle_auto_connect(self):
+        self.auto_connect = bool(self._auto_conn_var.get())
+        _update_settings("auto_connect", self.auto_connect)
+
+    def _auto_connect_on_startup(self):
+        if not (self.backend and self.backend.running):
+            try:
+                self._toggle_connect()
+            except Exception:
+                pass
+
     # --------------------------- 主题切换 ---------------------------
 
     def _toggle_theme(self):
@@ -1218,7 +1244,7 @@ class ChatApp:
             return
         self.appearance = mode
         set_appearance(mode)
-        _save_settings({"appearance": mode})
+        _update_settings("appearance", mode)
         self._rebuild_ui()
 
     def _rebuild_ui(self):

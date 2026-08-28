@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -545,6 +545,29 @@ def _record_voice_to(path, stop_evt, rate=16000):
         return True
     except Exception:
         return False
+
+
+def _make_qr_png(data, path):
+    """生成二维码 PNG（名片用）；失败返回空串。"""
+    try:
+        import qrcode
+        img = qrcode.make(str(data))
+        img.save(path)
+        return path
+    except Exception:
+        return ""
+
+
+def _read_qr_text(path):
+    """识别二维码图片，返回解码文本；失败返回空串。"""
+    try:
+        import zxingcpp
+        from PIL import Image
+        img = Image.open(path).convert("RGB")
+        for r in zxingcpp.read_barcodes(img):
+            return str(r.text)
+    except Exception:
+        return ""
 
 
 def _name_color(name):
@@ -1764,7 +1787,7 @@ class MqttBackend:
         try:
             last_pct = -1
             while True:
-                data = sock.recv(65536)
+                data = sock.recv(262144)
                 if not data:
                     break
                 r["fh"].write(data)
@@ -2052,7 +2075,7 @@ class MqttBackend:
             conn.settimeout(120)
             with open(p["path"], "rb") as fh:
                 while True:
-                    data = fh.read(65536)
+                    data = fh.read(262144)
                     if not data:
                         break
                     conn.sendall(data)
@@ -2504,6 +2527,8 @@ class ChatApp:
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
             help_menu.add_command(label="导出当前会话记录", command=self._export_current_history)
+            help_menu.add_command(label="我的名片…", command=self._show_my_card)
+            help_menu.add_command(label="扫名片…", command=self._scan_card)
             help_menu.add_command(label="网络测速…", command=self._measure_network)
             help_menu.add_command(label="备份全部数据…", command=self._backup_data)
             help_menu.add_command(label="从备份恢复…", command=self._restore_data)
@@ -3547,6 +3572,73 @@ class ChatApp:
             self._set_status(f"已恢复 {count} 个文件（重启后生效）", "ok")
         except Exception:
             self._set_status("恢复失败", "err")
+
+    def _show_my_card(self):
+        """显示我的名片二维码：对方扫码即可录入我的 ID 与昵称（QQ 扫码加好友的等价替代）。"""
+        data = json.dumps({"p2pcard": 1, "cid": self.cid,
+                           "name": (self._profile_name or self.nick_var.get() or "未命名")},
+                          ensure_ascii=False)
+        path = os.path.join(DATA_DIR, "my_card.png")
+        if not _make_qr_png(data, path):
+            self._set_status("生成名片失败（缺少 qrcode 库）", "err")
+            return
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("我的名片")
+            win.geometry("300x380")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            from PIL import Image as _I
+            img = _I.open(path).convert("RGB")
+            ctk_img = CTkImage(light_image=img, dark_image=img, size=(240, 240))
+            self._images.append(ctk_img)
+            ctk.CTkLabel(win, image=ctk_img, text="").pack(pady=(18, 4))
+            ctk.CTkLabel(win, text=f"{self._profile_name or '未命名'} · ID: {self.cid}",
+                         font=(FONT, 12, "bold"), text_color=C("text")).pack()
+            ctk.CTkLabel(win, text="让对方在应用里「扫名片」即可录入我",
+                         font=(FONT, 10), text_color=C("text_mute")).pack(pady=(2, 8))
+            ctk.CTkButton(win, text="保存二维码", width=120, height=30, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text"),
+                          hover_color=C("input_hover"), font=(FONT, 11),
+                          command=lambda: self._save_card_png(path)).pack(pady=6)
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
+    def _save_card_png(self, src):
+        try:
+            out = filedialog.asksaveasfilename(title="保存名片二维码", defaultextension=".png",
+                                               initialfile="my_card.png",
+                                               filetypes=[("PNG 图片", "*.png")])
+            if out and os.path.isfile(src):
+                with open(src, "rb") as fh, open(out, "wb") as fo:
+                    fo.write(fh.read())
+                self._set_status(f"已保存到 {out}", "ok")
+        except Exception:
+            self._set_status("保存失败", "err")
+
+    def _scan_card(self):
+        """扫名片：选择二维码图片，识别并录入联系人（ID + 昵称）。"""
+        path = filedialog.askopenfilename(title="选择名片二维码图片",
+                                          filetypes=[("图片", "*.png *.jpg *.jpeg *.webp *.bmp")])
+        if not path:
+            return
+        text = _read_qr_text(path)
+        if not text:
+            self._set_status("未识别到二维码", "err")
+            return
+        try:
+            d = json.loads(text)
+            if d.get("p2pcard") == 1 and d.get("cid"):
+                cid = str(d["cid"])
+                name = str(d.get("name", "？"))[:60]
+                self._ensure_dm_session(cid, name)
+                self._toggle_contact(cid, name)
+                self._set_status(f"✅ 已录入名片：{name}（可点击发起私聊）", "ok")
+                return
+        except Exception:
+            pass
+        self._set_status("不是有效的 P2P 名片二维码", "err")
 
     def _measure_network(self):
         """测量到 MQTT 服务器的连接延迟（TCP 建连耗时）。"""

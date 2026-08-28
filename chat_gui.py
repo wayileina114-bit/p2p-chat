@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -330,6 +330,17 @@ def _name_color(name):
     for ch in str(name):
         h = (h * 31 + ord(ch)) & 0xffffffff
     return palette[h % len(palette)]
+
+
+def _play_notify_sound():
+    """新消息提示音（Windows 用系统提示音，其它平台静默跳过）。"""
+    if os.name != "nt":
+        return
+    try:
+        import winsound
+        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+    except Exception:
+        pass
 
 
 def _load_rooms():
@@ -1055,6 +1066,7 @@ class ChatApp:
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
         self._history_expanded = False  # 是否已展开“更早消息”
+        self.notify_sound = bool(_load_settings().get("notify_sound", True))
 
         self.root.title("P2P 聊天")
         self.root.geometry("1000x680")
@@ -1224,6 +1236,9 @@ class ChatApp:
             self._auto_conn_var = tk.BooleanVar(value=self.auto_connect)
             settings_menu.add_checkbutton(label="启动时自动连接", variable=self._auto_conn_var,
                                           command=self._toggle_auto_connect)
+            self._sound_var = tk.BooleanVar(value=self.notify_sound)
+            settings_menu.add_checkbutton(label="新消息提示音", variable=self._sound_var,
+                                          command=self._toggle_notify_sound)
             menubar.add_cascade(label="设置", menu=settings_menu)
             help_menu = tk.Menu(menubar, tearoff=0)
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
@@ -1239,6 +1254,10 @@ class ChatApp:
     def _toggle_auto_connect(self):
         self.auto_connect = bool(self._auto_conn_var.get())
         _update_settings("auto_connect", self.auto_connect)
+
+    def _toggle_notify_sound(self):
+        self.notify_sound = bool(self._sound_var.get())
+        _update_settings("notify_sound", self.notify_sound)
 
     def _auto_connect_on_startup(self):
         if not (self.backend and self.backend.running):
@@ -1675,6 +1694,8 @@ class ChatApp:
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
         self._save_session(s)
+        if not mine and self.notify_sound:
+            _play_notify_sound()
         if key == self._current:
             show_head = self._should_show_head(s["messages"], len(s["messages"]) - 1)
             if img_path and os.path.isfile(img_path):

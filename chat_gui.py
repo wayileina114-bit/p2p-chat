@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.9.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.0.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -343,6 +343,26 @@ def _load_ctk_image(path, w, h):
             img = img.convert("RGB")
         img = img.copy()  # 独立内存副本，避免句柄/惰性加载问题
         return CTkImage(light_image=img, dark_image=img, size=(w, h))
+    except Exception:
+        return None
+
+
+def _circular_ctk_image(path, size):
+    """把头像裁剪成圆形并返回 CTkImage（聊天头像用）；失败返回 None。"""
+    if not path or not os.path.isfile(path):
+        return None
+    try:
+        from PIL import Image, ImageDraw
+        from customtkinter import CTkImage
+        img = Image.open(path)
+        img.load()
+        img = img.convert("RGBA").copy()
+        img = img.resize((size, size), Image.LANCZOS)
+        mask = Image.new("L", (size, size), 0)
+        ImageDraw.Draw(mask).ellipse([0, 0, size, size], fill=255)
+        out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        out.paste(img, (0, 0), mask)
+        return CTkImage(light_image=out, dark_image=out, size=(size, size))
     except Exception:
         return None
 
@@ -2236,6 +2256,7 @@ class ChatApp:
 
     def _scroll_bottom(self):
         try:
+            self.feed._parent_canvas.update_idletasks()
             self.feed._parent_canvas.yview_moveto(1.0)
         except Exception:
             pass
@@ -2243,6 +2264,7 @@ class ChatApp:
     def _maybe_scroll_bottom(self):
         """新内容到达时，仅当用户已在底部附近才自动滚动，避免打断向上翻阅历史。"""
         try:
+            self.feed._parent_canvas.update_idletasks()
             _top, bottom = self.feed._parent_canvas.yview()
             if float(bottom) >= 0.98:
                 self.feed._parent_canvas.yview_moveto(1.0)
@@ -2312,11 +2334,44 @@ class ChatApp:
             return True
         return (cur.get("ts") or 0) - (prev.get("ts") or 0) >= ChatApp.GROUP_GAP
 
+    def _avatar_label(self, parent, name, mine, size=34):
+        """聊天消息头像：自己的用真实头像（圆形），对方用彩色首字母（Discord 风格）。"""
+        img = None
+        if mine and self._avatar:
+            img = _circular_ctk_image(self._avatar, size)
+        if img is not None:
+            self._images.append(img)
+            return ctk.CTkLabel(parent, image=img, text="", width=size, height=size,
+                                corner_radius=size // 2, fg_color="transparent")
+        n = (name or "?").strip() or "?"
+        return ctk.CTkLabel(parent, text=n[:1].upper(), width=size, height=size,
+                            corner_radius=size // 2, fg_color=_name_color(n),
+                            text_color="#ffffff", font=(FONT, 15, "bold"))
+
+    def _message_row(self, name, mine, show_head):
+        """创建带头像的消息行，返回气泡控件；头像仅在消息组首条显示，其余缩进对齐。"""
+        AV, GAP = 34, 8
+        row = ctk.CTkFrame(self.feed, fg_color="transparent")
+        row.pack(fill="x", padx=12, pady=(6 if show_head else 1))
+        if mine:
+            if show_head:
+                self._avatar_label(row, name, True, AV).pack(side="right")
+            else:
+                ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="right")
+            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("mine_bubble"))
+            bubble.pack(side="right", padx=(0, GAP if show_head else 0))
+        else:
+            if show_head:
+                self._avatar_label(row, name, False, AV).pack(side="left")
+            else:
+                ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="left")
+            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("other_bubble"))
+            bubble.pack(side="left", padx=(GAP if show_head else 0, 0))
+        return bubble
+
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None):
         tstr = _fmt_time(ts) if ts else ""
-        bubble = ctk.CTkFrame(self.feed, corner_radius=14,
-                              fg_color=(C("mine_bubble") if mine else C("other_bubble")))
-        bubble.pack(anchor="e" if mine else "w", padx=12, pady=(6 if show_head else 1))
+        bubble = self._message_row(name, mine, show_head)
         if show_head:
             head = ctk.CTkFrame(bubble, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(6, 0))
@@ -2355,9 +2410,7 @@ class ChatApp:
                 if len(self._thumb_cache) > 256:  # 缓存上限，防内存无限增长
                     self._thumb_cache.clear()
             self._images.append(ctk_img)
-            bubble = ctk.CTkFrame(self.feed, corner_radius=14,
-                                  fg_color=(C("mine_bubble") if mine else C("other_bubble")))
-            bubble.pack(anchor="e" if mine else "w", padx=12, pady=(6 if show_head else 1))
+            bubble = self._message_row(name, mine, show_head)
             if show_head:
                 head = ctk.CTkFrame(bubble, fg_color="transparent")
                 head.pack(fill="x", padx=12, pady=(6, 2))

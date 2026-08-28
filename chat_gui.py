@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -482,16 +482,27 @@ def _notify_windows(title, msg):
         nid = _NID()
         nid.cbSize = ctypes.sizeof(_NID)
         nid.uID = 0x1234
-        nid.uFlags = 0x10  # NIF_INFO
+        nid.uFlags = 0x10 | 0x2  # NIF_INFO | NIF_ICON
         nid.szInfo = str(msg)[:255]
         nid.szInfoTitle = str(title)[:63]
         nid.dwInfoFlags = 0x1  # NIIF_INFO
         nid.uTimeout = 10000
-        # 带一个系统信息图标，保证托盘区有可显示气泡的图标
-        nid.uFlags |= 0x2  # NIF_ICON
         nid.hIcon = user32.LoadIconW(None, 32516)  # IDI_INFORMATION
         shell32.Shell_NotifyIconW(0, ctypes.byref(nid))  # NIM_ADD（首次即弹出气泡）
         shell32.Shell_NotifyIconW(1, ctypes.byref(nid))  # NIM_MODIFY（确保弹出）
+        # 气泡过期后删除托盘图标，避免残留一个空白图标
+        import threading
+
+        def _cleanup():
+            try:
+                d = _NID()
+                d.cbSize = ctypes.sizeof(_NID)
+                d.uID = 0x1234
+                shell32.Shell_NotifyIconW(2, ctypes.byref(d))  # NIM_DELETE
+            except Exception:
+                pass
+
+        threading.Timer(12.0, _cleanup).start()
         return True
     except Exception:
         return False
@@ -723,7 +734,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 on_recall=None, on_read=None, passphrase=""):
+                 on_recall=None, on_read=None, on_typing=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -737,6 +748,7 @@ class MqttBackend:
         self.on_dm = on_dm
         self.on_recall = on_recall
         self.on_read = on_read
+        self.on_typing = on_typing
 
         self.online = False
         self.running = False
@@ -901,6 +913,9 @@ class MqttBackend:
         if data.get("kind") == "read":
             self._fire_read(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
             return
+        if data.get("kind") == "typing":
+            self._fire_typing(room, str(data.get("name", "匿名"))[:60], str(data.get("cid", "")))
+            return
         if data.get("cid") == self.cid:
             return
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
@@ -979,6 +994,9 @@ class MqttBackend:
             return
         if data.get("kind") == "read":
             self._fire_read(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("name", "匿名")))
+            return
+        if data.get("kind") == "typing":
+            self._fire_typing(self.DM_FILE_PREFIX + str(sender), str(data.get("name", "匿名"))[:60], str(sender))
             return
         if not sender or sender == self.cid:
             return
@@ -1296,6 +1314,17 @@ class MqttBackend:
             self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
+    def send_typing(self, target, is_dm=False):
+        """广播“正在输入”状态（qos=0，瞬时、不持久化）。"""
+        if not self.online or self._client is None or not target:
+            return False
+        payload = json.dumps({"kind": "typing", "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
+        if is_dm:
+            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=0)
+        else:
+            self._client.publish(self._topic_room(target) + "/msg", payload, qos=0)
+        return True
+
     def send_file(self, room, path):
         if room not in self.rooms or not self.online or self._client is None:
             return False
@@ -1443,6 +1472,10 @@ class MqttBackend:
         if self.on_read:
             self.on_read(room, mid, cid, name)
 
+    def _fire_typing(self, room, name, cid):
+        if self.on_typing:
+            self.on_typing(room, name, cid)
+
     def _fire_peers(self):
         if self.on_peers:
             self.on_peers({cid: {"name": p["name"], "rooms": list(p.get("rooms") or [])}
@@ -1511,6 +1544,8 @@ class ChatApp:
         self._msg_search_after = None  # 消息搜索防抖 timer id
         self._suppress_auto_scroll = False  # 全量渲染时抑制逐条自动滚动，避免布局抖动/残影
         self._window_focused = True    # 窗口是否聚焦（后台/最小化时不聚焦，用于弹通知）
+        self._typing_after = None      # “正在输入”提示的延时恢复 timer id
+        self._typing_last = 0.0        # 上次发送“正在输入”广播的时间戳（节流用）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -2576,6 +2611,7 @@ class ChatApp:
             on_dm=self._cb_dm,
             on_read=self._cb_read,
             on_recall=self._cb_recall,
+            on_typing=self._cb_typing,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -2668,9 +2704,10 @@ class ChatApp:
         return names
 
     def _on_input_key(self, event):
-        """检测 @ 输入并弹出成员提及面板。"""
+        """检测 @ 输入并弹出成员提及面板；同时广播“正在输入”。"""
         if event.keysym in ("Up", "Down", "Return", "Escape", "Left", "Right", "BackSpace"):
             return
+        self._send_typing()
         try:
             text = self.input_box.get("1.0", "insert")
             at = text.rfind("@")
@@ -2838,6 +2875,60 @@ class ChatApp:
 
     def _cb_recall(self, room, mid, who):
         self.root.after(0, lambda: self._receive_recall(room, mid, who))
+
+    def _cb_typing(self, room, name, cid):
+        self.root.after(0, lambda: self._receive_typing(room, name, cid))
+
+    def _receive_typing(self, room, name, cid):
+        """收到“正在输入”状态：当前会话标题临时显示，2.5 秒后恢复。"""
+        if cid == self.cid:
+            return
+        if str(room).startswith("@"):
+            key = self._dm_key(str(room)[1:])
+        else:
+            key = self._group_key(room)
+        if key != self._current:
+            return
+        try:
+            s = self._sessions.get(key)
+            base = s["name"] if s else "聊天"
+            prefix = "私聊 · " if (s and s["kind"] == "dm") else "群聊 · "
+            self.chat_title.configure(text=f"{prefix}{base} · {name} 正在输入…")
+            if self._typing_after is not None:
+                try:
+                    self.root.after_cancel(self._typing_after)
+                except Exception:
+                    pass
+            self._typing_after = self.root.after(2500, self._clear_typing)
+        except Exception:
+            pass
+
+    def _clear_typing(self):
+        self._typing_after = None
+        try:
+            self._update_chat_title()
+        except Exception:
+            pass
+
+    def _send_typing(self):
+        """用户输入时广播“正在输入”（每 2 秒最多一次）。"""
+        if self._hint_active:
+            return
+        if not (self.backend and self.backend.online):
+            return
+        now = time.time()
+        if now - self._typing_last < 2.0:
+            return
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        self._typing_last = now
+        is_dm = s.get("kind") == "dm"
+        target = s.get("cid") if is_dm else s.get("room")
+        try:
+            self.backend.send_typing(target, is_dm)
+        except Exception:
+            pass
 
     def _receive_dm(self, from_cid, name, text, mid=None):
         s = self._ensure_dm_session(from_cid, name)

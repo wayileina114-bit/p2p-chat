@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -528,6 +528,12 @@ def _norm_msg(m):
         msg["system"] = True
     if m.get("mid"):
         msg["mid"] = str(m["mid"])
+    if m.get("read_by"):
+        msg["read_by"] = list(m["read_by"])
+    if m.get("recalled"):
+        msg["recalled"] = True
+        if m.get("recalled_by"):
+            msg["recalled_by"] = str(m["recalled_by"])
     if m.get("preview_tid"):
         msg["preview_tid"] = str(m["preview_tid"])
     if m.get("ts"):
@@ -1442,6 +1448,7 @@ class ChatApp:
         self._my_avatar_ctk = None  # 自己的圆形头像缓存
         self._last_title = ""       # 窗口标题缓存（避免频繁重设）
         self._read_acked = set()     # 已发送过已读回执的消息 mid
+        self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -2207,6 +2214,7 @@ class ChatApp:
         if not mine and self.notify_sound and not system:
             _play_notify_sound()
         if key == self._current:
+            self._stick_bottom = self._at_bottom()
             if system:
                 self._render_system_line(text)
                 self._maybe_scroll_bottom()
@@ -2216,7 +2224,8 @@ class ChatApp:
                 if img_path and os.path.isfile(img_path):
                     self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
                 else:
-                    self._add_bubble(name, text, mine, msg.get("ts"), show_head, file_path=file_path)
+                    self._add_bubble(name, text, mine, msg.get("ts"), show_head,
+                                     file_path=file_path, mid=mid)
         else:
             s["unread"] = s.get("unread", 0) + 1
             self._schedule_session_list()
@@ -2407,6 +2416,7 @@ class ChatApp:
             on_status=self._cb_status,
             on_dm=self._cb_dm,
             on_read=self._cb_read,
+            on_recall=self._cb_recall,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -2667,6 +2677,9 @@ class ChatApp:
     def _cb_read(self, room, mid, cid, name):
         self.root.after(0, lambda: self._receive_read(room, mid, cid, name))
 
+    def _cb_recall(self, room, mid, who):
+        self.root.after(0, lambda: self._receive_recall(room, mid, who))
+
     def _receive_dm(self, from_cid, name, text, mid=None):
         s = self._ensure_dm_session(from_cid, name)
         s["online"] = True
@@ -2693,6 +2706,50 @@ class ChatApp:
                 if key == self._current:
                     self._render_feed()
                 return
+
+    def _receive_recall(self, room, mid, who):
+        """收到撤回指令：把对应消息标记为已撤回。"""
+        if not mid:
+            return
+        if str(room).startswith("@"):
+            key = self._dm_key(str(room)[1:])
+        else:
+            key = self._group_key(room)
+        s = self._sessions.get(key)
+        if s is None:
+            return
+        for m in s["messages"]:
+            if m.get("mid") == mid:
+                if m.get("recalled"):
+                    return
+                m["recalled"] = True
+                m["recalled_by"] = who or "对方"
+                self._save_session(s)
+                if key == self._current:
+                    self._render_feed()
+                return
+
+    def _do_recall(self, mid):
+        """右键撤回自己的消息。"""
+        if not (self.backend and self.backend.online):
+            self._set_status("未连接，无法撤回", "err")
+            return
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        is_dm = s.get("kind") == "dm"
+        target = s.get("cid") if is_dm else s.get("room")
+        if self.backend.send_recall(target, mid, is_dm):
+            self._set_status("已撤回", "ok")
+            for m in s.get("messages", []):
+                if m.get("mid") == mid:
+                    m["recalled"] = True
+                    m["recalled_by"] = "我"
+                    self._save_session(s)
+                    break
+            self._render_feed()
+        else:
+            self._set_status("撤回失败", "err")
 
     def _ack_reads(self, s):
         """对会话里已显示的他人消息发送已读回执（每条只发一次）。"""
@@ -2760,15 +2817,25 @@ class ChatApp:
         except Exception:
             pass
 
+    def _at_bottom(self):
+        """当前是否贴底（用于新消息到达前的贴底判定）。"""
+        try:
+            canvas = self.feed._parent_canvas
+            _top, bottom = canvas.yview()
+            return float(bottom) >= 0.98
+        except Exception:
+            return True
+
     def _maybe_scroll_bottom(self):
-        """新内容到达时，仅当用户已在底部附近才自动滚动，避免打断向上翻阅历史。"""
+        """新内容到达时，仅当用户此前已贴底才自动滚动，避免打断向上翻阅历史。
+        必须在内容 append 前调用 _at_bottom() 记录 _stick_bottom，否则新内容已把
+        视口顶出底部，会误判成“用户在上翻”。"""
         def _do():
             try:
                 canvas = self.feed._parent_canvas
                 canvas.update_idletasks()
                 canvas.configure(scrollregion=canvas.bbox("all"))
-                _top, bottom = canvas.yview()
-                if float(bottom) >= 0.98:
+                if self._stick_bottom:
                     canvas.yview_moveto(1.0)
             except Exception:
                 pass
@@ -2786,6 +2853,7 @@ class ChatApp:
                 s["unread"] = s.get("unread", 0) + 1
                 self._apply_session_list()
             return
+        self._stick_bottom = self._at_bottom()
         tid = info.get("tid")
         fname = info.get("name", "file")
         size = info.get("size", 0)
@@ -2879,7 +2947,11 @@ class ChatApp:
         return bubble
 
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
-                     read_by=None):
+                     read_by=None, mid=None, recalled=False, recalled_by=None):
+        if recalled:
+            label = "（已撤回）" if mine else f"（{recalled_by or '对方'} 撤回了一条消息）"
+            self._render_system_line(label)
+            return
         tstr = _fmt_time(ts) if ts else ""
         bubble = self._message_row(name, mine, show_head)
         if show_head:
@@ -2894,7 +2966,7 @@ class ChatApp:
                             text_color=(C("mine_text") if mine else C("other_text")),
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
-        body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p))
+        body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid))
         if mine and read_by:
             names = "、".join(read_by[:5])
             if len(read_by) > 5:
@@ -2969,11 +3041,13 @@ class ChatApp:
         except Exception:
             pass
 
-    def _message_menu(self, event, text, file_path=None):
-        """消息右键菜单：复制文本 + （文件消息）打开位置 / 复制路径。"""
+    def _message_menu(self, event, text, file_path=None, mine=False, mid=None):
+        """消息右键菜单：复制 / 撤回 / （文件消息）打开位置。"""
         try:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
+            if mine and mid:
+                menu.add_command(label="撤回", command=lambda: self._do_recall(mid))
             if file_path:
                 menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(file_path))
                 menu.add_command(label="复制路径", command=lambda: self._copy_to_clipboard(file_path))
@@ -2992,6 +3066,7 @@ class ChatApp:
         target_key = target_key or self._current
         if target_key is None or target_key != self._current:
             return
+        self._stick_bottom = self._at_bottom()
         self._render_system_line(text)
         self._maybe_scroll_bottom()
         self._trim_feed()
@@ -3044,7 +3119,9 @@ class ChatApp:
                 self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
             else:
                 self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
-                                 file_path=m.get("file_path"), read_by=m.get("read_by"))
+                                 file_path=m.get("file_path"), read_by=m.get("read_by"),
+                                 mid=m.get("mid"), recalled=m.get("recalled"),
+                                 recalled_by=m.get("recalled_by"))
         self._scroll_bottom()
         self._ack_reads(s)
 

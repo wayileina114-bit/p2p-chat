@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3507,8 +3507,9 @@ class ChatApp:
                             corner_radius=size // 2, fg_color=_name_color(n),
                             text_color="#ffffff", font=(FONT, 15, "bold"))
 
-    def _message_row(self, name, mine, show_head):
-        """创建带头像的消息行，返回气泡控件；头像仅在消息组首条显示，其余缩进对齐。"""
+    def _message_row(self, name, mine, show_head, highlight=False):
+        """创建带头像的消息行，返回气泡控件；头像仅在消息组首条显示，其余缩进对齐。
+        highlight=True 时给气泡加高亮边框（用于 @ 我的消息）。"""
         AV, GAP = 34, 8
         row = ctk.CTkFrame(self.feed, fg_color="transparent")
         row.pack(fill="x", padx=12, pady=(6 if show_head else 1))
@@ -3517,14 +3518,18 @@ class ChatApp:
                 self._avatar_label(row, name, True, AV).pack(side="right")
             else:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="right")
-            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("mine_bubble"))
+            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("mine_bubble"),
+                                   border_width=(2 if highlight else 0),
+                                   border_color=(C("accent") if highlight else None))
             bubble.pack(side="right", padx=(0, GAP if show_head else 0))
         else:
             if show_head:
                 self._avatar_label(row, name, False, AV).pack(side="left")
             else:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="left")
-            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("other_bubble"))
+            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("other_bubble"),
+                                   border_width=(2 if highlight else 0),
+                                   border_color=(C("accent") if highlight else None))
             bubble.pack(side="left", padx=(GAP if show_head else 0, 0))
         return bubble
 
@@ -3536,7 +3541,7 @@ class ChatApp:
             self._render_system_line(label)
             return
         tstr = _fmt_time(ts) if ts else ""
-        bubble = self._message_row(name, mine, show_head)
+        bubble = self._message_row(name, mine, show_head, highlight=self._mentions_me(text))
         if reply:
             rname = str(reply.get("name", ""))[:20]
             rtext = str(reply.get("text", "")).replace("\n", " ")[:40]
@@ -3573,6 +3578,13 @@ class ChatApp:
                          font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
         self._maybe_scroll_bottom()
         self._trim_feed()
+
+    def _mentions_me(self, text):
+        """判断消息正文是否 @ 了我（用于高亮）。"""
+        my = (self.nick_var.get().strip() or self._profile_name or "").strip()
+        if not my:
+            return False
+        return f"@{my}" in str(text)
 
     def _add_image_bubble(self, name, path, mine, ts=None, show_head=True):
         tstr = _fmt_time(ts) if ts else ""

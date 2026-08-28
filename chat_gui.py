@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.10"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -157,6 +157,21 @@ def fmt_size(n):
     if n < 1024 * 1024:
         return f"{n / 1024:.1f} KB"
     return f"{n / 1024 / 1024:.1f} MB"
+
+
+def _md5_file(path, chunk=256 * 1024):
+    """流式计算文件 MD5，避免把大文件一次性读进内存。"""
+    h = hashlib.md5()
+    try:
+        with open(path, "rb") as f:
+            while True:
+                b = f.read(chunk)
+                if not b:
+                    break
+                h.update(b)
+    except Exception:
+        return ""
+    return h.hexdigest()
 
 
 def collect_env_report():
@@ -986,17 +1001,15 @@ class MqttBackend:
         if size > MAX_FILE:
             self._fire_file(room, "error", {"name": os.path.basename(path), "msg": "超过 200MB 上限"})
             return False
-        with open(path, "rb") as f:
-            blob = f.read()
         name = os.path.basename(path)
         mime = guess_mime(name)
         total = max(1, math.ceil(size / CHUNK_SIZE))
-        md5 = hashlib.md5(blob).hexdigest()
+        md5 = _md5_file(path)
         tid = uuid.uuid4().hex[:12]
 
         self._pending[tid] = {
             "name": name, "size": size, "mime": mime, "total": total,
-            "md5": md5, "blob": blob, "path": path, "room": room,
+            "md5": md5, "path": path, "room": room,
             "accepted": False, "evt": threading.Event(),
         }
         offer = {"kind": "offer", "id": tid, "from": self.cid, "sname": self.nickname,
@@ -1047,24 +1060,36 @@ class MqttBackend:
         p = self._pending.get(tid)
         if p is None:
             return
-        blob, total, name = p["blob"], p["total"], p["name"]
+        total, name = p["total"], p["name"]
         room = p["room"]
+        path = p["path"]
         data_topic = self._topic_room(room) + "/file/data"
-        for i in range(total):
-            if not self.online or self._client is None:
-                self._pending.pop(tid, None)
-                self._fire_file(room, "error", {"name": name, "msg": "发送中断，连接已断开"})
-                return
-            piece = blob[i * CHUNK_SIZE:(i + 1) * CHUNK_SIZE]
-            frame = b"C" + tid.encode("ascii") + struct.pack(">I", i) + piece
-            try:
-                self._client.publish(data_topic, frame, qos=1)
-            except Exception:
-                self._pending.pop(tid, None)
-                self._fire_file(room, "error", {"name": name, "msg": "发送出错"})
-                return
-            if i % 8 == 0 or i + 1 == total:
-                self._fire_file(room, "progress", {"name": name, "percent": int((i + 1) / total * 100)})
+        try:
+            fh = open(path, "rb")
+        except Exception:
+            self._pending.pop(tid, None)
+            self._fire_file(room, "error", {"name": name, "msg": "读取文件失败"})
+            return
+        try:
+            for i in range(total):
+                if not self.online or self._client is None:
+                    self._pending.pop(tid, None)
+                    self._fire_file(room, "error", {"name": name, "msg": "发送中断，连接已断开"})
+                    return
+                piece = fh.read(CHUNK_SIZE)
+                if not piece:
+                    break
+                frame = b"C" + tid.encode("ascii") + struct.pack(">I", i) + piece
+                try:
+                    self._client.publish(data_topic, frame, qos=1)
+                except Exception:
+                    self._pending.pop(tid, None)
+                    self._fire_file(room, "error", {"name": name, "msg": "发送出错"})
+                    return
+                if i % 8 == 0 or i + 1 == total:
+                    self._fire_file(room, "progress", {"name": name, "percent": int((i + 1) / total * 100)})
+        finally:
+            fh.close()
         self._pending.pop(tid, None)
         self._fire_file(room, "sent", {"name": name, "size": p["size"], "mime": p["mime"], "path": p["path"]})
 

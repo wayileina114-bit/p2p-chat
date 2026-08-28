@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1052,6 +1052,7 @@ class ChatApp:
         self._hint_active = True
         self._thumb_cache = {}      # 图片缩略图缓存：path -> CTkImage
         self._search_after = None   # 搜索防抖 timer id
+        self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
         self._history_expanded = False  # 是否已展开“更早消息”
 
@@ -1287,6 +1288,15 @@ class ChatApp:
             except Exception:
                 pass
         self._search_after = self.root.after(120, self._apply_session_list)
+
+    def _schedule_session_list(self):
+        """合并短时间内的多次列表重建（presence 连串更新时避免抖动）。"""
+        if self._list_after is not None:
+            try:
+                self.root.after_cancel(self._list_after)
+            except Exception:
+                pass
+        self._list_after = self.root.after(150, self._apply_session_list)
 
     def _open_downloads(self):
         try:
@@ -1930,14 +1940,14 @@ class ChatApp:
         s = self._ensure_dm_session(from_cid, name)
         s["online"] = True
         self._append_message(s["key"], name, text, False)
-        self._apply_session_list()
+        self._schedule_session_list()
 
     def _refresh_peers(self, peers):
         self._peers = peers or {}
         for s in self._sessions.values():
             if s["kind"] == "dm":
                 s["online"] = s["cid"] in self._peers
-        self._apply_session_list()
+        self._schedule_session_list()
         self._update_chat_title()
         if self.backend and self.backend.online:
             total = len(self._peers)

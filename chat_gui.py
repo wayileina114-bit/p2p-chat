@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.17"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.18"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -449,6 +449,8 @@ def _norm_msg(m):
         msg["img_path"] = str(m["img_path"])
     if m.get("file_path"):
         msg["file_path"] = str(m["file_path"])
+    if m.get("system"):
+        msg["system"] = True
     if m.get("ts"):
         msg["ts"] = m["ts"]
     return msg
@@ -1833,11 +1835,13 @@ class ChatApp:
 
     # --------------------------- 消息追加 / 持久化 ---------------------------
 
-    def _append_message(self, key, name, text, mine, img_path=None, file_path=None):
+    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False):
         s = self._sessions.get(key)
         if s is None:
             return
         msg = {"name": name, "text": text, "mine": mine, "ts": time.time()}
+        if system:
+            msg["system"] = True
         if img_path:
             msg["img_path"] = img_path
         if file_path:
@@ -1846,14 +1850,19 @@ class ChatApp:
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
         self._save_session(s)
-        if not mine and self.notify_sound:
+        if not mine and self.notify_sound and not system:
             _play_notify_sound()
         if key == self._current:
-            show_head = self._should_show_head(s["messages"], len(s["messages"]) - 1)
-            if img_path and os.path.isfile(img_path):
-                self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
+            if system:
+                self._render_system_line(text)
+                self._maybe_scroll_bottom()
+                self._trim_feed()
             else:
-                self._add_bubble(name, text, mine, msg.get("ts"), show_head, file_path=file_path)
+                show_head = self._should_show_head(s["messages"], len(s["messages"]) - 1)
+                if img_path and os.path.isfile(img_path):
+                    self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
+                else:
+                    self._add_bubble(name, text, mine, msg.get("ts"), show_head, file_path=file_path)
         else:
             s["unread"] = s.get("unread", 0) + 1
             self._apply_session_list()
@@ -2350,12 +2359,15 @@ class ChatApp:
             except Exception:
                 pass
 
+    def _render_system_line(self, text):
+        ctk.CTkLabel(self.feed, text=text, text_color=C("text_mute"), wraplength=560,
+                     justify="center", font=(FONT, 10)).pack(pady=6)
+
     def _show_system(self, text, target_key=None):
         target_key = target_key or self._current
         if target_key is None or target_key != self._current:
             return
-        ctk.CTkLabel(self.feed, text=text, text_color=C("text_mute"), wraplength=560,
-                     justify="center", font=(FONT, 10)).pack(pady=6)
+        self._render_system_line(text)
         self._maybe_scroll_bottom()
         self._trim_feed()
 
@@ -2401,7 +2413,9 @@ class ChatApp:
                              font=(FONT, 10)).pack(pady=(8, 2))
                 last_day = dlabel
             show_head = day_break or self._should_show_head(msgs, idx)
-            if m.get("img_path") and os.path.isfile(m["img_path"]):
+            if m.get("system"):
+                self._render_system_line(m.get("text", ""))
+            elif m.get("img_path") and os.path.isfile(m["img_path"]):
                 self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
             else:
                 self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
@@ -2431,7 +2445,7 @@ class ChatApp:
         elif event == "offer":
             self._add_file_offer_card(key, room, info)
         elif event == "rejected":
-            self._show_system(f"⚠️ 对方拒绝接收：{name}", key)
+            self._append_message(key, "", f"⚠️ 对方拒绝接收：{name}", False, system=True)
         elif event == "done":
             sname = info.get("sname", "对方")
             path = info.get("path", "")
@@ -2442,7 +2456,7 @@ class ChatApp:
                                      file_path=path)
             self._show_system(f"✅ 已保存到：{path}", key)
         elif event == "error":
-            self._show_system(f"⚠️ {name}：{info.get('msg', '失败')}", key)
+            self._append_message(key, "", f"⚠️ {name}：{info.get('msg', '失败')}", False, system=True)
 
     def _on_close(self):
         if self.backend:

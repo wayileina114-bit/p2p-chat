@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2145,6 +2145,7 @@ class ChatApp:
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
             help_menu.add_command(label="导出当前会话记录", command=self._export_current_history)
+            help_menu.add_command(label="网络测速…", command=self._measure_network)
             help_menu.add_command(label="备份全部数据…", command=self._backup_data)
             help_menu.add_command(label="从备份恢复…", command=self._restore_data)
             help_menu.add_separator()
@@ -3181,6 +3182,20 @@ class ChatApp:
             self._set_status(f"已恢复 {count} 个文件（重启后生效）", "ok")
         except Exception:
             self._set_status("恢复失败", "err")
+
+    def _measure_network(self):
+        """测量到 MQTT 服务器的连接延迟（TCP 建连耗时）。"""
+        self._set_status("正在测速…", "mute")
+        host, port = self.broker, self.port
+        try:
+            import socket as _s
+            t0 = time.time()
+            s = _s.create_connection((host, int(port)), timeout=5)
+            s.close()
+            ms = (time.time() - t0) * 1000
+            self._set_status(f"服务器 {host}:{port} · 连接耗时 {ms:.0f} ms", "accent")
+        except Exception:
+            self._set_status(f"无法连接服务器 {host}:{port}", "err")
 
     def _export_current_history(self):
         """把当前会话的聊天记录导出为 txt 文件。"""

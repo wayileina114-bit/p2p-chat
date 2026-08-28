@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -117,16 +117,22 @@ THEMES = {
 _APPEARANCE = "dark"
 
 
-def set_appearance(mode):
-    """切换全局主题；mode 取 dark / light，非法值回退 dark。"""
+def set_appearance(mode, apply_ctk=True):
+    """切换全局主题；mode 取 dark / light，非法值回退 dark。
+
+    apply_ctk=False 时只更新内部配色表 _APPEARANCE，不调用 ctk.set_appearance_mode。
+    用于主题切换时先重建界面（用新配色）、最后再切 ctk 外观模式，避免标题栏重绘的
+    after(1) 焦点恢复回调指向已销毁的旧控件而抛 "bad window path name"。
+    """
     global _APPEARANCE
     if mode not in THEMES:
         mode = "dark"
     _APPEARANCE = mode
-    try:
-        ctk.set_appearance_mode(mode)
-    except Exception:
-        pass
+    if apply_ctk:
+        try:
+            ctk.set_appearance_mode(mode)
+        except Exception:
+            pass
 
 
 def C(key):
@@ -1275,9 +1281,16 @@ class ChatApp:
         if mode not in THEMES or mode == self.appearance:
             return
         self.appearance = mode
-        set_appearance(mode)
         _update_settings("appearance", mode)
+        # 先更新配色并重建界面，最后再切换 ctk 外观模式。ctk.set_appearance_mode 会触发
+        # Windows 标题栏重绘（withdraw/deiconify）并 after(1) 恢复焦点；若在重建前调用，
+        # 焦点恢复会指向已销毁的旧控件而崩溃。
+        set_appearance(mode, apply_ctk=False)
         self._rebuild_ui()
+        try:
+            ctk.set_appearance_mode(mode)
+        except Exception:
+            pass
 
     def _rebuild_ui(self):
         # 主题切换：销毁并重建全部控件（会话/历史状态保存在 self 里，不丢）
@@ -2597,8 +2610,27 @@ def _install_excepthook():
         pass
 
 
-def _report_callback_exception(self, etype, value, tb):
-    # 替换 tkinter 的默认回调异常处理，落日志而不是静默闪退
+def _is_benign_tk_error(value):
+    """判断是否为无害的 Tk 错误：控件被销毁后的迟到回调（customtkinter 按钮点击动画、
+    标题栏焦点恢复等）会抛 'bad window path name' / 'invalid command name'。这类错误只落
+    日志、不弹窗打断用户，避免「程序出错」误报。"""
+    try:
+        if isinstance(value, tk.TclError):
+            msg = str(value)
+            return ("bad window path name" in msg) or ("invalid command name" in msg)
+    except Exception:
+        pass
+    return False
+
+
+def _report_callback_exception(etype, value, tb):
+    # 替换 tkinter 的默认回调异常处理，落日志而不是静默闪退。
+    # 注意：tkinter 以 report_callback_exception(etype, value, tb) 三个参数调用（这是
+    # 普通函数而非绑定方法），签名必须恰好三个参数。若误写成 (self, etype, value, tb)，
+    # 处理函数自身会抛 TypeError，把可恢复的回调错误升级成整个程序崩溃。
+    if _is_benign_tk_error(value):
+        _write_crash(etype, value, tb)
+        return
     p = _write_crash(etype, value, tb)
     _notify_crash(p)
 

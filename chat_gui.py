@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -154,6 +154,18 @@ THEMES = {
         "warn_bg": "#fff7e6", "warn_text": "#8a6f1a", "section": "#9aa0ab",
         "mute": "#9aa0ab", "ok": "#1a7f37", "err": "#e5484d",
     },
+    "pink": {
+        "app_bg": "#fff0f6", "panel": "#ffffff", "panel_2": "#ffe4ef",
+        "input_bg": "#ffe9f3", "input_hover": "#ffd9e8",
+        "accent": "#ff6fa5", "accent_hover": "#f0528f",
+        "mine_bubble": "#ff9ec7", "mine_text": "#ffffff",
+        "other_bubble": "#fff5fa", "other_text": "#5c3a4a",
+        "text": "#5c3a4a", "text_2": "#a06b83", "text_mute": "#c49aad",
+        "hover": "#ffedf5", "selected_bg": "#ffd3e6", "selected_text": "#d6336c",
+        "online": "#23a55a", "danger": "#e5484d",
+        "warn_bg": "#fff3e6", "warn_text": "#b06a1a", "section": "#c49aad",
+        "mute": "#c49aad", "ok": "#23a55a", "err": "#e5484d",
+    },
 }
 
 _APPEARANCE = "dark"
@@ -172,7 +184,8 @@ def set_appearance(mode, apply_ctk=True):
     _APPEARANCE = mode
     if apply_ctk:
         try:
-            ctk.set_appearance_mode(mode)
+            # ctk 只有 dark/light；pink（二次元粉）按亮色处理
+            ctk.set_appearance_mode("light" if mode != "dark" else "dark")
         except Exception:
             pass
 
@@ -2016,7 +2029,7 @@ class ChatApp:
         self._apply_session_list()
         self._render_feed()
         self._set_status("未连接", "mute")
-        self._show_system("顶部输入房间名后点「＋ 加入」可加多个房间；点「连接」开始聊天。文字/图片/文件都能发。")
+        self._show_system("🌸 欢迎使用 P2P 聊天！顶部输入房间名点「＋ 加入」，再点「连接」即可开聊。文字 / 图片 / 语音 / 文件都能发，同网段还自动走局域网直连加速哦～")
         if self.auto_connect:
             self.root.after(400, self._auto_connect_on_startup)
 
@@ -2034,7 +2047,8 @@ class ChatApp:
                                           text_color=C("text_2"), font=(FONT, 14),
                                           command=self._manual_check_update)
         self.update_btn.pack(side="right", padx=(0, 8), pady=12)
-        self.theme_btn = ctk.CTkButton(top, text=("☀️" if self.appearance == "dark" else "🌙"),
+        _tbtn = {"dark": "🌙", "light": "☀️", "pink": "🌸"}.get(self.appearance, "🌙")
+        self.theme_btn = ctk.CTkButton(top, text=_tbtn,
                                         width=40, height=32, corner_radius=8,
                                         fg_color=C("input_bg"), hover_color=C("input_hover"),
                                         text_color=C("text_2"), font=(FONT, 14),
@@ -2215,6 +2229,7 @@ class ChatApp:
             view_menu = tk.Menu(menubar, tearoff=0)
             view_menu.add_command(label="深色主题", command=lambda: self._set_theme("dark"))
             view_menu.add_command(label="浅色主题", command=lambda: self._set_theme("light"))
+            view_menu.add_command(label="二次元粉 🌸", command=lambda: self._set_theme("pink"))
             menubar.add_cascade(label="视图", menu=view_menu)
             settings_menu = tk.Menu(menubar, tearoff=0)
             settings_menu.add_command(label="设置中心…", command=self._open_settings)
@@ -2370,7 +2385,12 @@ class ChatApp:
     # --------------------------- 主题切换 ---------------------------
 
     def _toggle_theme(self):
-        self._set_theme("light" if self.appearance == "dark" else "dark")
+        order = ["dark", "light", "pink"]
+        try:
+            nxt = order[(order.index(self.appearance) + 1) % len(order)]
+        except Exception:
+            nxt = "dark"
+        self._set_theme(nxt)
 
     def _toggle_dnd(self):
         """免打扰开关：一键静音通知 + 提示音。"""
@@ -2392,7 +2412,7 @@ class ChatApp:
         set_appearance(mode, apply_ctk=False)
         self._rebuild_ui()
         try:
-            ctk.set_appearance_mode(mode)
+            ctk.set_appearance_mode("light" if mode != "dark" else "dark")
         except Exception:
             pass
 
@@ -2798,9 +2818,9 @@ class ChatApp:
             return
         if s["kind"] == "group":
             n = sum(1 for p in self._peers.values() if s["room"] in (p.get("rooms") or []))
-            self.chat_title.configure(text=f"群聊 · {s['name']}（{n}人在线）")
+            self.chat_title.configure(text=f"🌸 群聊 · {s['name']}（{n}人在线）")
         else:
-            self.chat_title.configure(text=f"私聊 · {s['name']}")
+            self.chat_title.configure(text=f"💌 私聊 · {s['name']}")
 
     def _toggle_members(self):
         """展开 / 收起当前会话的成员列表。"""
@@ -4514,6 +4534,13 @@ class ChatApp:
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
         body.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
         bubble.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
+        if file_path:
+            # QQ 式：点击文件消息直接打开/下载
+            def _open_file(_e, p=file_path):
+                self._open_file_location(p)
+            for w in (bubble, body):
+                w.bind("<Button-1>", _open_file)
+                w.configure(cursor="hand2")
         if ts:
             ft = _fmt_full_time(ts)
             def _enter(_e, ft=ft): self._set_status(f"{name} · {ft}", "mute")
@@ -4977,7 +5004,7 @@ class ChatApp:
                 self._append_message(key, my, f"🖼 图片：{name}", True,
                                      img_path=info["path"], mid=info.get("tid"))
             else:
-                self._show_system(f"📤 已发送请求，等待对方接收：{name}（{fmt_size(size)}）", key)
+                self._show_system(f"📤 正在发送文件：{name}（{fmt_size(size)}）", key)
         elif event == "accepted":
             self._show_system(f"✅ 对方已接受，开始发送：{name}", key)
         elif event == "accepting":
@@ -4991,17 +5018,20 @@ class ChatApp:
                 self._append_message(key, my, f"🎤 语音：{name}", True,
                                      file_path=info.get("path", ""), voice=True)
             else:
-                self._append_message(key, my, f"📎 已发送文件：{name}（{fmt_size(size)}）", True,
+                self._append_message(key, my, f"📎 {name}（{fmt_size(size)}）· 点击打开", True,
                                      file_path=info.get("path", ""))
         elif event == "offer":
             if is_image(mime) and info.get("thumb"):
                 self._show_image_preview(key, room, info)
-            elif _is_voice_name(name):
-                # 语音自动接收（不弹确认），完成后显示可播放气泡
+            else:
+                # QQ 式：语音/文件一律自动接收，不弹窗询问；直接显示在聊天界面
                 if self.backend:
                     self.backend.accept_file(info.get("tid"))
-            else:
-                self._add_file_offer_card(key, room, info)
+                sname = info.get("sname", "对方")
+                if not _is_voice_name(name):
+                    self._append_message(key, sname,
+                                         f"📥 正在接收文件：{name}（{fmt_size(size)}）",
+                                         False, system=True)
         elif event == "rejected":
             self._append_message(key, "", f"⚠️ 对方拒绝接收：{name}", False, system=True)
         elif event == "done":
@@ -5015,7 +5045,7 @@ class ChatApp:
                 self._append_message(key, sname, f"🎤 语音：{name}", False,
                                      file_path=path, voice=True)
             else:
-                self._append_message(key, sname, f"📎 已收到文件：{name}（{fmt_size(size)}）", False,
+                self._append_message(key, sname, f"📎 {name}（{fmt_size(size)}）· 点击打开", False,
                                      file_path=path)
             self._show_system(f"✅ 已保存到：{path}", key)
         elif event == "error":

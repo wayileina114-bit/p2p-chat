@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.4.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -444,6 +444,53 @@ def _get_lan_ip():
         return ""
 
 
+def _is_voice_name(name):
+    """判断文件名是否是支持的语音格式。"""
+    return str(name or "").lower().endswith((".wav", ".mp3", ".ogg", ".m4a", ".aac", ".flac"))
+
+
+def _play_voice(path):
+    """播放语音：WAV 用系统 winsound，其它格式用系统默认播放器。"""
+    if not path or not os.path.isfile(path):
+        return
+    try:
+        if str(path).lower().endswith(".wav"):
+            import winsound
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+        elif os.name == "nt":
+            os.startfile(path)
+        else:
+            import subprocess
+            subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
+
+
+def _record_voice_to(path, stop_evt, rate=16000):
+    """后台线程录音到 WAV（sounddevice），直到 stop_evt 被设置。"""
+    try:
+        import sounddevice as sd
+        import numpy as np
+        import wave
+        chunks = []
+
+        def _cb(indata, frames, time_info, status):
+            chunks.append(indata.copy())
+
+        with sd.InputStream(samplerate=rate, channels=1, dtype="int16", callback=_cb):
+            while not stop_evt.is_set():
+                time.sleep(0.05)
+        data = np.concatenate(chunks) if chunks else np.zeros((0, 1), dtype="int16")
+        with wave.open(path, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(rate)
+            wf.writeframes(data.tobytes())
+        return True
+    except Exception:
+        return False
+
+
 def _name_color(name):
     """根据昵称生成稳定的头像底色（Discord 风格彩色首字母）。"""
     palette = ["#5865f2", "#3ba55d", "#faa61a", "#ed4245", "#eb459e",
@@ -659,6 +706,8 @@ def _norm_msg(m):
         msg["edited"] = True
     if m.get("pinned"):
         msg["pinned"] = True
+    if m.get("voice"):
+        msg["voice"] = True
     if m.get("reply"):
         msg["reply"] = dict(m["reply"])
     if m.get("reactions"):
@@ -2059,6 +2108,12 @@ class ChatApp:
         ctk.CTkButton(btncol, text="😊 表情", width=88, height=30, corner_radius=8,
                       fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                       font=(FONT, 12), command=self._toggle_emoji_panel).pack(fill="x", pady=3)
+        self.voice_btn = ctk.CTkButton(btncol, text="🎤 按住说话", width=88, height=30, corner_radius=8,
+                                       fg_color=C("input_bg"), text_color=C("text_2"),
+                                       hover_color=C("input_hover"), font=(FONT, 11))
+        self.voice_btn.pack(fill="x", pady=3)
+        self.voice_btn.bind("<ButtonPress-1>", lambda e: self._start_voice())
+        self.voice_btn.bind("<ButtonRelease-1>", lambda e: self._stop_voice())
 
     # --------------------------- 菜单 / 环境检测 ---------------------------
 
@@ -2931,7 +2986,7 @@ class ChatApp:
         except Exception:
             pass
 
-    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False, mid=None, preview_tid=None, reply=None):
+    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False, mid=None, preview_tid=None, reply=None, voice=False):
         s = self._sessions.get(key)
         if s is None:
             return
@@ -2948,6 +3003,8 @@ class ChatApp:
             msg["file_path"] = file_path
         if reply:
             msg["reply"] = reply
+        if voice:
+            msg["voice"] = True
         s["messages"].append(msg)
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
@@ -2970,7 +3027,9 @@ class ChatApp:
                 self._trim_feed()
             else:
                 show_head = self._should_show_head(s["messages"], len(s["messages"]) - 1)
-                if img_path and os.path.isfile(img_path):
+                if voice and file_path and os.path.isfile(file_path):
+                    self._add_voice_bubble(name, file_path, mine, msg.get("ts"), show_head)
+                elif img_path and os.path.isfile(img_path):
                     self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
                 else:
                     self._add_bubble(name, text, mine, msg.get("ts"), show_head,
@@ -3445,6 +3504,53 @@ class ChatApp:
         for path in paths:
             if path and os.path.isfile(path):
                 self._do_send_file(path)
+
+    def _start_voice(self):
+        """按住说话：开始录音。"""
+        if getattr(self, "_voice_recording", False):
+            return
+        if not (self.backend and self.backend.online):
+            self._set_status("未连接，无法发送语音", "err")
+            return
+        try:
+            import sounddevice  # noqa: F401
+        except Exception:
+            self._set_status("当前环境不支持录音（缺少 sounddevice）", "err")
+            return
+        self._voice_recording = True
+        self._voice_stop_evt = threading.Event()
+        self._voice_tmp = os.path.join(DATA_DIR, "voice_" + uuid.uuid4().hex[:10] + ".wav")
+        self._voice_thread = threading.Thread(
+            target=lambda: _record_voice_to(self._voice_tmp, self._voice_stop_evt), daemon=True)
+        self._voice_thread.start()
+        try:
+            self.voice_btn.configure(text="⏹ 松开发送", fg_color=C("danger"))
+        except Exception:
+            pass
+        self._set_status("录音中… 松开按钮发送", "accent")
+
+    def _stop_voice(self):
+        """松开按钮：停止录音并发送（太短则取消）。"""
+        if not getattr(self, "_voice_recording", False):
+            return
+        self._voice_recording = False
+        try:
+            self._voice_stop_evt.set()
+        except Exception:
+            pass
+        try:
+            self.voice_btn.configure(text="🎤 按住说话", fg_color=C("input_bg"))
+        except Exception:
+            pass
+        try:
+            self._voice_thread.join(timeout=1.5)
+        except Exception:
+            pass
+        if os.path.isfile(self._voice_tmp) and os.path.getsize(self._voice_tmp) > 4000:
+            self._do_send_file(self._voice_tmp)
+            self._set_status("语音已发送", "ok")
+        else:
+            self._set_status("录音太短，已取消", "mute")
 
     def _toggle_emoji_panel(self):
         if getattr(self, "_emoji_win", None) is not None:
@@ -4237,6 +4343,33 @@ class ChatApp:
             return False
         return f"@{my}" in str(text)
 
+    def _add_voice_bubble(self, name, path, mine, ts=None, show_head=True):
+        """渲染语音消息气泡：显示时长，点击播放。"""
+        tstr = _fmt_time(ts) if ts else ""
+        bubble = self._message_row(name, mine, show_head)
+        if show_head:
+            head = ctk.CTkFrame(bubble, fg_color="transparent")
+            head.pack(fill="x", padx=12, pady=(6, 0))
+            ctk.CTkLabel(head, text=name, text_color=C("text_mute"),
+                         font=(FONT, 10)).pack(side="left")
+            if tstr:
+                ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
+                             font=(FONT, 9)).pack(side="right")
+        dur = 0
+        try:
+            import wave
+            with wave.open(path, "rb") as wf:
+                dur = wf.getnframes() / float(wf.getframerate())
+        except Exception:
+            pass
+        dur_txt = f"{dur:.0f}″" if dur > 0 else ""
+        ctk.CTkButton(bubble, text=f"🎤 语音 {dur_txt}", width=130, height=36, corner_radius=16,
+                      fg_color=C("input_bg"), text_color=C("text"),
+                      hover_color=C("input_hover"), font=(FONT, 12),
+                      command=lambda p=path: _play_voice(p)).pack(anchor="w", padx=12, pady=6)
+        self._maybe_scroll_bottom()
+        self._trim_feed()
+
     def _add_image_bubble(self, name, path, mine, ts=None, show_head=True):
         tstr = _fmt_time(ts) if ts else ""
         if not (_HAS_PIL and path and os.path.isfile(path)):
@@ -4536,6 +4669,8 @@ class ChatApp:
             show_head = day_break or self._should_show_head(msgs, idx)
             if m.get("system"):
                 self._render_system_line(m.get("text", ""))
+            elif m.get("voice") and m.get("file_path") and os.path.isfile(m["file_path"]):
+                self._add_voice_bubble(m["name"], m["file_path"], m["mine"], ts, show_head)
             elif m.get("img_path") and os.path.isfile(m["img_path"]):
                 self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
             else:
@@ -4633,12 +4768,19 @@ class ChatApp:
         elif event == "sent":
             if is_image(mime):
                 self._set_status(f"✅ 图片已发送：{name}", "ok")
+            elif _is_voice_name(name) and info.get("path"):
+                self._append_message(key, my, f"🎤 语音：{name}", True,
+                                     file_path=info.get("path", ""), voice=True)
             else:
                 self._append_message(key, my, f"📎 已发送文件：{name}（{fmt_size(size)}）", True,
                                      file_path=info.get("path", ""))
         elif event == "offer":
             if is_image(mime) and info.get("thumb"):
                 self._show_image_preview(key, room, info)
+            elif _is_voice_name(name):
+                # 语音自动接收（不弹确认），完成后显示可播放气泡
+                if self.backend:
+                    self.backend.accept_file(info.get("tid"))
             else:
                 self._add_file_offer_card(key, room, info)
         elif event == "rejected":
@@ -4650,6 +4792,9 @@ class ChatApp:
                 if not self._replace_preview(key, info.get("tid"), path):
                     self._append_message(key, sname, f"🖼 图片：{name}", False,
                                          img_path=path, mid=info.get("tid"))
+            elif _is_voice_name(name):
+                self._append_message(key, sname, f"🎤 语音：{name}", False,
+                                     file_path=path, voice=True)
             else:
                 self._append_message(key, sname, f"📎 已收到文件：{name}（{fmt_size(size)}）", False,
                                      file_path=path)

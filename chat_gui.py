@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2304,7 +2304,7 @@ class ChatApp:
         self._current = self._group_key(self._rooms[0])
 
         self._apply_session_list()
-        self._render_feed()
+        self.root.after(1, self._render_feed)  # 延迟渲染 feed，窗口先显示，启动更快
         self._set_status("未连接", "mute")
         self._show_system("🌸 欢迎使用 P2P 聊天！顶部输入房间名点「＋ 加入」，再点「连接」即可开聊。文字 / 图片 / 语音 / 文件都能发，同网段还自动走局域网直连加速哦～")
         if self.auto_connect:
@@ -5010,27 +5010,8 @@ class ChatApp:
             self._add_bubble(name, "🖼 一张图片", mine, ts, show_head)
             return
         try:
-            # 缩略图缓存：按 路径+mtime 复用已解码的 CTkImage，避免每次切会话都重新解码整张图
             cache_key = (path, int(os.path.getmtime(path)))
             ctk_img = self._thumb_cache.get(cache_key)
-            if ctk_img is None:
-                from PIL import Image  # 惰性加载
-                Image.MAX_IMAGE_PIXELS = None  # 允许超大原图也能渲染缩略图
-                img = Image.open(path)
-                try:
-                    img.draft("RGB", (560, 560))  # JPEG 先降采样，加速解码
-                except Exception:
-                    pass
-                img.load()  # 强制解码，损坏图片这里会失败而非渲染时崩溃
-                if img.mode not in ("RGB", "RGBA"):
-                    img = img.convert("RGB")
-                img = img.copy()
-                img.thumbnail((280, 280))
-                ctk_img = CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
-                self._thumb_cache[cache_key] = ctk_img
-                if len(self._thumb_cache) > 256:  # 缓存上限，防内存无限增长
-                    self._thumb_cache.clear()
-            self._images.append(ctk_img)
             bubble = self._message_row(name, mine, show_head)
             if show_head:
                 head = ctk.CTkFrame(bubble, fg_color="transparent")
@@ -5040,14 +5021,72 @@ class ChatApp:
                 if tstr:
                     ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
                                  font=(FONT, 9)).pack(side="right")
-            _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
-            _img.pack(padx=6, pady=4)
-            _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
-            _img.bind("<Button-3>", lambda e, p=path: self._message_menu(e, p, p))
+            if ctk_img is not None:
+                self._images.append(ctk_img)
+                self._pack_image_label(bubble, ctk_img, path)
+            else:
+                # 后台解码缩略图，UI 线程先显示占位（图片多时不卡界面）
+                ph = ctk.CTkLabel(bubble, text="🖼 加载中…", width=140, height=96,
+                                  fg_color=C("input_bg"), text_color=C("text_mute"),
+                                  font=(FONT, 11))
+                ph.pack(padx=6, pady=4)
+                threading.Thread(target=self._decode_thumb_worker,
+                                 args=(path, cache_key, bubble, ph), daemon=True).start()
             self._maybe_scroll_bottom()
             self._trim_feed()
         except Exception:
             self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts)
+
+    def _decode_thumb_worker(self, path, cache_key, bubble, ph):
+        """后台线程解码缩略图（PIL 解码不进 UI 线程）。"""
+        img = None
+        try:
+            from PIL import Image
+            Image.MAX_IMAGE_PIXELS = None
+            im = Image.open(path)
+            try:
+                im.draft("RGB", (560, 560))
+            except Exception:
+                pass
+            im.load()
+            if im.mode not in ("RGB", "RGBA"):
+                im = im.convert("RGB")
+            im = im.copy()
+            im.thumbnail((280, 280))
+            img = im
+        except Exception:
+            img = None
+        try:
+            self.root.after(0, lambda: self._apply_image_thumb(bubble, ph, cache_key, img, path))
+        except Exception:
+            pass
+
+    def _apply_image_thumb(self, bubble, ph, cache_key, img, path):
+        """主线程：解码完成后把占位替换为图片。"""
+        try:
+            if bubble is None or not bubble.winfo_exists():
+                return
+            if ph is not None:
+                try:
+                    ph.destroy()
+                except Exception:
+                    pass
+            if img is None:
+                return
+            ctk_img = CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
+            self._thumb_cache[cache_key] = ctk_img
+            if len(self._thumb_cache) > 256:
+                self._thumb_cache.clear()
+            self._images.append(ctk_img)
+            self._pack_image_label(bubble, ctk_img, path)
+        except Exception:
+            pass
+
+    def _pack_image_label(self, bubble, ctk_img, path):
+        _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
+        _img.pack(padx=6, pady=4)
+        _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
+        _img.bind("<Button-3>", lambda e, p=path: self._message_menu(e, p, p))
 
     def _copy_to_clipboard(self, text):
         try:

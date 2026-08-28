@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -212,19 +212,6 @@ THEMES = {
         "mute": "#9aa0ab", "ok": "#1a7f37", "err": "#e5484d",
         "search_hl": "#f0b429",
     },
-    "pink": {
-        "app_bg": "#fff0f6", "panel": "#ffffff", "panel_2": "#ffe4ef",
-        "input_bg": "#ffe9f3", "input_hover": "#ffd9e8",
-        "accent": "#ff6fa5", "accent_hover": "#f0528f",
-        "mine_bubble": "#ff9ec7", "mine_text": "#ffffff",
-        "other_bubble": "#fff5fa", "other_text": "#5c3a4a",
-        "text": "#5c3a4a", "text_2": "#a06b83", "text_mute": "#c49aad",
-        "hover": "#ffedf5", "selected_bg": "#ffd3e6", "selected_text": "#d6336c",
-        "online": "#23a55a", "danger": "#e5484d",
-        "warn_bg": "#fff3e6", "warn_text": "#b06a1a", "section": "#c49aad",
-        "mute": "#c49aad", "ok": "#23a55a", "err": "#e5484d",
-        "search_hl": "#f0b429",
-    },
 }
 
 _APPEARANCE = "dark"
@@ -243,7 +230,7 @@ def set_appearance(mode, apply_ctk=True):
     _APPEARANCE = mode
     if apply_ctk:
         try:
-            # ctk 只有 dark/light；pink（二次元粉）按亮色处理
+            # ctk 只有 dark/light；其它主题按亮色处理
             ctk.set_appearance_mode("light" if mode != "dark" else "dark")
         except Exception:
             pass
@@ -2783,7 +2770,7 @@ class ChatApp:
                                           text_color=C("text_2"), font=(FONT, 14),
                                           command=self._manual_check_update)
         self.update_btn.pack(side="right", padx=(0, 8), pady=12)
-        _tbtn = {"dark": "🌙", "light": "☀️", "pink": "🌸"}.get(self.appearance, "🌙")
+        _tbtn = {"dark": "🌙", "light": "☀️"}.get(self.appearance, "🌙")
         self.theme_btn = ctk.CTkButton(top, text=_tbtn,
                                         width=40, height=32, corner_radius=8,
                                         fg_color=C("input_bg"), hover_color=C("input_hover"),
@@ -2947,9 +2934,11 @@ class ChatApp:
         ctk.CTkButton(btncol, text="📎 文件/图片", width=88, height=30, corner_radius=8,
                       fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                       font=(FONT, 12), command=self._pick_file).pack(fill="x", pady=3)
-        ctk.CTkButton(btncol, text="😊 表情", width=88, height=30, corner_radius=8,
-                      fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
-                      font=(FONT, 12), command=self._toggle_emoji_panel).pack(fill="x", pady=3)
+        self.emoji_btn = ctk.CTkButton(btncol, text="😊 表情", width=88, height=30, corner_radius=8,
+                                        fg_color=C("input_bg"), text_color=C("text_2"),
+                                        hover_color=C("input_hover"), font=(FONT, 12),
+                                        command=self._toggle_emoji_panel)
+        self.emoji_btn.pack(fill="x", pady=3)
         self.voice_btn = ctk.CTkButton(btncol, text="🎤 按住说话", width=88, height=30, corner_radius=8,
                                        fg_color=C("input_bg"), text_color=C("text_2"),
                                        hover_color=C("input_hover"), font=(FONT, 11))
@@ -2965,7 +2954,6 @@ class ChatApp:
             view_menu = tk.Menu(menubar, tearoff=0)
             view_menu.add_command(label="深色主题", command=lambda: self._set_theme("dark"))
             view_menu.add_command(label="浅色主题", command=lambda: self._set_theme("light"))
-            view_menu.add_command(label="二次元粉 🌸", command=lambda: self._set_theme("pink"))
             menubar.add_cascade(label="视图", menu=view_menu)
             settings_menu = tk.Menu(menubar, tearoff=0)
             settings_menu.add_command(label="设置中心…", command=self._open_settings)
@@ -3132,7 +3120,7 @@ class ChatApp:
     # --------------------------- 主题切换 ---------------------------
 
     def _toggle_theme(self):
-        order = ["dark", "light", "pink"]
+        order = ["dark", "light"]
         try:
             nxt = order[(order.index(self.appearance) + 1) % len(order)]
         except Exception:
@@ -3221,8 +3209,19 @@ class ChatApp:
         self._build_menu()
         self.nick_var.set(nick or self._profile_name or "未命名")
         self._apply_session_list()
-        self._render_feed()
+        # 主题切换期间限制首屏渲染量（历史保留，切完后自动补全），切换更快
+        _saved = self.RENDER_MAX
+        self.RENDER_MAX = min(_saved, 60)
+        try:
+            self._render_feed()
+        finally:
+            self.RENDER_MAX = _saved
         self._update_window_title()
+        # 切换完成后延迟补全剩余消息（后台分批，不卡切换）
+        try:
+            self.root.after(250, self._render_feed)
+        except Exception:
+            pass
         try:
             self.root.deiconify()
         except Exception:
@@ -4642,23 +4641,49 @@ class ChatApp:
             return None
 
     def _on_paste(self, event):
-        """Ctrl+V：若剪贴板是图片则作为图片发送，否则走默认文本粘贴。"""
-        img = self._grab_clipboard_image()
-        if img is None:
-            return None
-        if not (self.backend and self.backend.online):
-            self._show_system("尚未连接，无法发送。")
-            return "break"
+        """Ctrl+V：若剪贴板是图片/图片文件则作为图片发送，否则走默认文本粘贴。
+
+        支持三种剪贴板内容：
+        1) 图像对象（截图工具/浏览器复制的位图）
+        2) 图片文件路径列表（文件管理器复制的图片）
+        3) 普通文本（默认行为）
+        """
         try:
-            _ensure_data_dir()
-            path = os.path.join(DATA_DIR, "paste_" + uuid.uuid4().hex[:10] + ".png")
-            if img.mode not in ("RGB", "RGBA"):
-                img = img.convert("RGB")
-            img.save(path, "PNG")
-            self._do_send_file(path)
+            from PIL import Image, ImageGrab
+            clip = None
+            try:
+                clip = ImageGrab.grabclipboard()
+            except Exception:
+                clip = None
+            if clip is None:
+                return None
+            # 图片文件路径列表：发送第一个图片
+            if isinstance(clip, (list, tuple)) and clip:
+                p0 = str(clip[0])
+                if os.path.isfile(p0) and _is_image_path(p0):
+                    if not (self.backend and self.backend.online):
+                        self._show_system("尚未连接，无法发送。")
+                        return "break"
+                    self._do_send_file(p0)
+                    return "break"
+                return None  # 文件非图片：走默认粘贴路径
+            if isinstance(clip, Image.Image):
+                if not (self.backend and self.backend.online):
+                    self._show_system("尚未连接，无法发送。")
+                    return "break"
+                try:
+                    _ensure_data_dir()
+                    path = os.path.join(DATA_DIR, "paste_" + uuid.uuid4().hex[:10] + ".png")
+                    if clip.mode not in ("RGB", "RGBA"):
+                        clip = clip.convert("RGB")
+                    clip.save(path, "PNG")
+                    self._do_send_file(path)
+                except Exception:
+                    pass
+                return "break"
         except Exception:
             pass
-        return "break"
+        return None
 
     def _mention_names(self):
         """可 @ 的成员：当前房间在线成员 + 在线名单（去重）。"""
@@ -4947,6 +4972,13 @@ class ChatApp:
                 self._emoji_drawn = -1  # 已绘制分组标记（-1 = 未绘制）
                 win.bind("<Escape>", lambda e: self._close_emoji_panel())
                 win.bind("<FocusOut>", lambda e: self._on_emoji_focus_out())
+                # 给窗口显式设置尺寸（避免默认宽度），并记录为缓存尺寸：之后显示用它定位
+                try:
+                    self._emoji_size = (cols * cell + 16, 8 * cell + 96)
+                    win.geometry(f"{self._emoji_size[0]}x{self._emoji_size[1]}")
+                    win.update_idletasks()
+                except Exception:
+                    self._emoji_size = (380, 300)
                 win.withdraw()
             except Exception:
                 try:
@@ -4965,12 +4997,23 @@ class ChatApp:
                 self._emoji_root_bind = None
             win.deiconify()
             win.attributes("-topmost", True)
-            # 不强制 update_idletasks（真实窗口下那是慢的根源），用缓存尺寸定位
-            self._emoji_size = getattr(self, "_emoji_size", None) or (400, 320)
-            w, h = self._emoji_size
-            x = self.root.winfo_rootx() + self.root.winfo_width() - w - 24
-            y = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
-            win.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
+            # 用创建时记录的真实尺寸定位，弹出在情绪按钮右上方（贴近输入区）
+            w, h = getattr(self, "_emoji_size", None) or (400, 320)
+            try:
+                bx = self.emoji_btn.winfo_rootx()
+                by = self.emoji_btn.winfo_rooty()
+                bw = self.emoji_btn.winfo_width()
+            except Exception:
+                bx = self.root.winfo_rootx() + self.root.winfo_width() - w - 24
+                by = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
+                bw = 0
+            x = bx + bw - w
+            y = by - h - 8
+            if y < 0:
+                y = by + 40
+            if x < 0:
+                x = 0
+            win.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
             self._emoji_hidden = False
             # 绘制延后一帧：先显示空面板，表情后台逐步绘制，开启不卡
             if getattr(self, "_emoji_drawn", -1) != getattr(self, "_emoji_group_idx", 0):
@@ -5868,6 +5911,12 @@ class ChatApp:
                                    hl_color=(C("search_hl") if search_hl and not self._mentions_me(text) else None))
         if mid:
             self._bubble_frames[mid] = bubble
+            # 多选模式：点击气泡勾选（再点取消）
+            if getattr(self, "_multi_mode", False):
+                self._multi_frames[mid] = bubble
+                bubble.configure(cursor="hand2")
+                for _w in (bubble,):
+                    _w.bind("<Button-1>", lambda e, m=mid: self._toggle_multi_select(m), add="+")
         if reply:
             rname = str(reply.get("name", ""))[:20]
             rtext = str(reply.get("text", "")).replace("\n", " ")[:40]
@@ -6229,6 +6278,7 @@ class ChatApp:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
+            menu.add_command(label="多选转发…", command=self._start_multi_select)
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text))
             if mid:
                 react_menu = tk.Menu(menu, tearoff=0)
@@ -6237,7 +6287,7 @@ class ChatApp:
                 menu.add_cascade(label="回应", menu=react_menu)
                 menu.add_command(label=("取消置顶" if self._is_pinned(mid) else "置顶"),
                                  command=lambda: self._toggle_pin(mid))
-            if mine and mid:
+            if mid:
                 menu.add_command(label="编辑", command=lambda: self._edit_message_dialog(mid, text))
                 menu.add_command(label="撤回", command=lambda: self._do_recall(mid))
             if file_path:
@@ -6250,15 +6300,105 @@ class ChatApp:
             except Exception:
                 pass
 
+    def _start_multi_select(self):
+        """进入多选转发模式：点击消息气泡勾选，底部工具栏转发。"""
+        try:
+            self._multi_mode = True
+            self._multi_selected = []
+            self._multi_frames = {}
+            # 底部工具栏
+            bar = ctk.CTkFrame(self._ibar.master, fg_color=C("panel"), corner_radius=10)
+            self._multi_bar = bar
+            bar.pack(fill="x", padx=8, pady=(0, 4), before=self._ibar)
+            self._multi_count_lbl = ctk.CTkLabel(bar, text="已选 0 条（点击消息勾选）",
+                                                 text_color=C("text"), font=(FONT, 11))
+            self._multi_count_lbl.pack(side="left", padx=10, pady=6)
+            ctk.CTkButton(bar, text="→ 转发", width=70, height=28, corner_radius=8,
+                          fg_color=C("accent"), hover_color=C("accent_hover"),
+                          font=(FONT, 11, "bold"), command=self._finish_multi_forward).pack(side="right", padx=(0, 8), pady=5)
+            ctk.CTkButton(bar, text="取消", width=60, height=28, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 11),
+                          command=self._exit_multi_select).pack(side="right", padx=6, pady=5)
+            self._render_feed()  # 重渲染：气泡可点击勾选
+            self._set_status("多选转发模式：点击消息勾选，再点“→ 转发”", "accent")
+        except Exception:
+            self._exit_multi_select()
+
+    def _toggle_multi_select(self, mid):
+        """切换某条消息的选中状态并更新高亮。"""
+        try:
+            if mid in self._multi_selected:
+                self._multi_selected.remove(mid)
+            else:
+                self._multi_selected.append(mid)
+            f = self._multi_frames.get(mid)
+            if f is not None:
+                try:
+                    f.configure(border_width=(2 if mid in self._multi_selected else 0),
+                                border_color=(C("accent") if mid in self._multi_selected else None))
+                except Exception:
+                    pass
+            try:
+                self._multi_count_lbl.configure(text=f"\u5df2\u9009 {len(self._multi_selected)} \u6761\uff08\u70b9\u51fb\u6d88\u606f\u52fe\u9009\uff09")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _finish_multi_forward(self):
+        """收集已选消息文本，转发。"""
+        try:
+            s = self._sessions.get(self._current)
+            texts = []
+            if s:
+                for m in s["messages"]:
+                    mid = m.get("mid")
+                    if mid and mid in self._multi_selected:
+                        t = str(m.get("text", "")).strip()
+                        if t and not m.get("system"):
+                            texts.append(t)
+            self._exit_multi_select()
+            if texts:
+                self._forward_dialog(texts)
+            else:
+                self._set_status("没有选中可转发的文字消息", "err")
+        except Exception:
+            self._exit_multi_select()
+
+    def _exit_multi_select(self):
+        """退出多选模式，清理工具栏。"""
+        try:
+            self._multi_mode = False
+            self._multi_selected = []
+            self._multi_frames = {}
+            bar = getattr(self, "_multi_bar", None)
+            if bar is not None:
+                try:
+                    bar.destroy()
+                except Exception:
+                    pass
+                self._multi_bar = None
+            self._render_feed()
+        except Exception:
+            pass
+
     def _forward_dialog(self, text):
         """弹出转发目标选择框，把文本转发到指定会话。"""
         try:
+            if isinstance(text, list):
+                texts = [t for t in text if t and str(t).strip()]
+            else:
+                texts = [text]
             win = ctk.CTkToplevel(self.root)
             win.title("转发到…")
             win.geometry("360x440")
             win.resizable(False, False)
             win.attributes("-topmost", True)
-            ctk.CTkLabel(win, text="选择转发目标", font=(FONT, 13, "bold"),
+            label = "选择转发目标"
+            if len(texts) > 1:
+                label = f"选择转发目标（{len(texts)} 条消息）"
+            ctk.CTkLabel(win, text=label, font=(FONT, 13, "bold"),
                          text_color=C("text")).pack(pady=(14, 4))
             scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
             scroll.pack(fill="both", expand=True, padx=12, pady=8)
@@ -6266,18 +6406,18 @@ class ChatApp:
                 ctk.CTkButton(scroll, text=f"# {room}", height=32, corner_radius=8,
                               anchor="w", fg_color=C("input_bg"), text_color=C("text"),
                               hover_color=C("input_hover"), font=(FONT, 12),
-                              command=lambda r=room: self._do_forward(r, text, False, win)).pack(fill="x", pady=2)
+                              command=lambda r=room: self._do_forward(r, texts, False, win)).pack(fill="x", pady=2)
             for s in list(self._sessions.values()):
                 if s.get("kind") == "dm":
                     ctk.CTkButton(scroll, text=f"@ {s['name']}", height=32, corner_radius=8,
                                   anchor="w", fg_color=C("input_bg"), text_color=C("text"),
                                   hover_color=C("input_hover"), font=(FONT, 12),
-                                  command=lambda s=s: self._do_forward(s["cid"], text, True, win)).pack(fill="x", pady=2)
+                                  command=lambda s=s: self._do_forward(s["cid"], texts, True, win)).pack(fill="x", pady=2)
             win.bind("<Escape>", lambda e: win.destroy())
         except Exception:
             pass
 
-    def _do_forward(self, target, text, is_dm, win):
+    def _do_forward(self, target, texts, is_dm, win):
         try:
             win.destroy()
         except Exception:
@@ -6285,14 +6425,23 @@ class ChatApp:
         if not (self.backend and self.backend.online):
             self._set_status("未连接，无法转发", "err")
             return
+        if isinstance(texts, str):
+            texts = [texts]
+        texts = [str(t) for t in (texts or []) if str(t or "").strip()]
+        if not texts:
+            self._set_status("没有可转发的消息", "err")
+            return
         my = self.nick_var.get().strip() or "未命名"
-        if is_dm:
-            if self.backend.send_dm(target, text):
-                self._append_message(self._dm_key(target), my, text, True)
-                self._set_status("已转发", "ok")
-        else:
-            if self.backend.send_text(target, text):
-                self._set_status("已转发", "ok")
+        ok = 0
+        for t in texts:
+            if is_dm:
+                if self.backend.send_dm(target, t):
+                    self._append_message(self._dm_key(target), my, t, True)
+                    ok += 1
+            else:
+                if self.backend.send_text(target, t):
+                    ok += 1
+        self._set_status(f"已转发 {ok}/{len(texts)} 条", "ok" if ok else "err")
 
     def _edit_message_dialog(self, mid, text):
         """弹出编辑消息对话框（预填原文，保存后提交编辑）。"""
@@ -7113,9 +7262,10 @@ def _install_excepthook():
     sys.excepthook = hook
     try:
         def thook(args):
+            # 后台线程异常只写日志不弹窗（弹窗会导致“请不刷新错误窗口”）。
+            # 后台线程（网络/直连/备份等）出错应自治复体，不打断用户。
             tb = getattr(args, "exc_traceback", None)
-            p = _write_crash(args.exc_type, args.exc_value, tb)
-            _notify_crash(p)
+            _write_crash(args.exc_type, args.exc_value, tb)
         threading.excepthook = thook
     except Exception:
         pass
@@ -7156,15 +7306,41 @@ def _resource_path(rel):
 
 
 def _set_window_icon(root):
-    """设置运行时窗口图标（标题栏 / 任务栏），与安装程序 / exe 图标一致。"""
+    """设置运行时窗口图标（标题栏 + 任务栏）为用户自定义图标。
+
+    优先用 iconbitmap（Windows 原生 ICO），再用 iconphoto
+    把 ICO 转 PNG 设置一次（同时覆盖标题栏与任务栏）。
+    兼容了部分 Windows 环境下 iconbitmap 不刷任务栏的情况。"""
     try:
         ico = _resource_path("P2PChat.ico")
-        if os.path.isfile(ico):
+        if not os.path.isfile(ico):
+            return False
+        try:
             root.iconbitmap(ico)
+        except Exception:
+            pass
+        try:
+            from PIL import Image as _PIL
+            import tkinter as _tk
+            img = _PIL.open(ico)
+            # 取一个适中尺寸的帧转 PNG，iconphoto 接受 PhotoImage
+            try:
+                img.seek(0)
+                img = img.convert("RGBA")
+                img.thumbnail((64, 64))
+            except Exception:
+                pass
+            import io as _io
+            buf = _io.BytesIO()
+            img.save(buf, "PNG")
+            photo = _tk.PhotoImage(data=buf.getvalue())
+            root.iconphoto(True, photo)
+            root._p2p_icon_ref = photo  # 防止被垃圾回收
             return True
+        except Exception:
+            return True  # iconbitmap 已成功
     except Exception:
-        pass
-    return False
+        return False
 
 
 def main():

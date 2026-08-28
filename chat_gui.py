@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2317,15 +2317,27 @@ class ChatApp:
             return
         if s["kind"] == "group":
             room = s["room"]
-            names = [self.nick_var.get().strip() or "未命名"]
-            for p in self._peers.values():
+            others = []
+            for cid, p in self._peers.items():
+                if cid == self.cid:
+                    continue
                 n = str(p.get("name", "")).strip()
-                if n and room in (p.get("rooms") or []) and n not in names:
-                    names.append(n)
-            ctk.CTkLabel(self.members_frame, text=f"在线成员 · {len(names)} 人",
+                if n and room in (p.get("rooms") or []):
+                    others.append((cid, n))
+            total = len(others) + 1  # 含自己
+            ctk.CTkLabel(self.members_frame, text=f"在线成员 · {total} 人（点击私聊）",
                          text_color=C("text_mute"), font=(FONT, 10)).pack(anchor="w", padx=10, pady=(6, 2))
-            ctk.CTkLabel(self.members_frame, text="、".join(names), wraplength=560, justify="left",
-                         text_color=C("text"), font=(FONT, 11)).pack(anchor="w", padx=10, pady=(0, 8))
+            if others:
+                flow = ctk.CTkFrame(self.members_frame, fg_color="transparent")
+                flow.pack(fill="x", padx=8, pady=(0, 8))
+                for cid, nm in others:
+                    ctk.CTkButton(flow, text=nm, height=26, corner_radius=13,
+                                  fg_color=C("input_bg"), text_color=C("text"),
+                                  hover_color=C("input_hover"), font=(FONT, 11),
+                                  command=lambda c=cid, nm=nm: self._start_dm(c, nm)).pack(side="left", padx=2, pady=2)
+            else:
+                ctk.CTkLabel(self.members_frame, text="（暂无其他成员）",
+                             text_color=C("text_mute"), font=(FONT, 11)).pack(anchor="w", padx=10, pady=(0, 8))
         else:
             online = s.get("cid") in self._peers
             ctk.CTkLabel(self.members_frame,

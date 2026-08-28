@@ -37,7 +37,7 @@ exit /b 0
 echo 检测到 Python，正在升级 pip 并安装全部依赖...
 echo.
 %RUN% -m pip install --upgrade pip --disable-pip-version-check
-%RUN% -m pip install paho-mqtt pillow customtkinter tkinterdnd2 --disable-pip-version-check
+%RUN% -m pip install paho-mqtt pillow customtkinter tkinterdnd2 cryptography --disable-pip-version-check
 echo.
 echo ============================================
 echo  依赖安装完成！现在可双击「启动聊天.bat」开始聊天。

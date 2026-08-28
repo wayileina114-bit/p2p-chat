@@ -63,14 +63,35 @@ except Exception:
     DND_FILES = None
     _HAS_DND = False
 
+try:
+    from cryptography.fernet import Fernet
+    _HAS_CRYPTO = True
+except Exception:
+    Fernet = None
+    _HAS_CRYPTO = False
+
 # 拖拽功能是否在运行时真正可用（成功后才会注册 drop target，避免 tkdnd 加载失败导致崩溃）
 _DND_READY = False
+
+
+def _derive_fernet(passphrase):
+    """从口令派生 Fernet 加密器（PBKDF2-SHA256 派生 AES 密钥）；无口令或无库时返回 None。"""
+    if not passphrase or not _HAS_CRYPTO:
+        return None
+    try:
+        import base64
+        import hashlib
+        key = hashlib.pbkdf2_hmac("sha256", passphrase.encode("utf-8"),
+                                  b"p2pchat-e2e-v1", 200000, 32)
+        return Fernet(base64.urlsafe_b64encode(key))
+    except Exception:
+        return None
 
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.0.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -199,6 +220,7 @@ def collect_env_report():
         ("Pillow", "PIL", "图片显示与预览"),
         ("customtkinter", "customtkinter", "圆角现代界面"),
         ("tkinterdnd2", "tkinterdnd2", "拖拽发送文件/图片"),
+        ("cryptography", "cryptography", "端到端加密（可选）"),
     ]
     items = []
     for pip_name, mod_name, desc in checks:
@@ -617,11 +639,13 @@ class MqttBackend:
     DM_FILE_PREFIX = "@"          # 私聊文件传输伪房间名前缀：@对方cid
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
-                 on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None):
+                 on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
+                 passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
         self.port = port
+        self.fernet = _derive_fernet(passphrase)
 
         self.on_text = on_text
         self.on_peers = on_peers
@@ -766,11 +790,26 @@ class MqttBackend:
 
     # --------------------------- 文本 / 在场 / 私聊 ---------------------------
 
+    def _decrypt_data(self, data):
+        """解密 {'enc': ...} 形式的载荷；无密钥或解密失败返回 None。"""
+        if self.fernet is None:
+            return None
+        try:
+            plain = self.fernet.decrypt(str(data.get("enc", "")).encode("ascii"))
+            return json.loads(plain.decode("utf-8"))
+        except Exception:
+            return None
+
     def _handle_text(self, room, raw):
         try:
             data = json.loads(raw.decode("utf-8"))
         except Exception:
             return
+        if isinstance(data, dict) and "enc" in data:
+            data = self._decrypt_data(data)
+            if data is None:
+                self._fire_text(room, "🔒", "收到加密消息（未设置口令或口令不匹配）", False)
+                return
         if data.get("cid") == self.cid:
             return
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
@@ -837,6 +876,12 @@ class MqttBackend:
             data = json.loads(raw.decode("utf-8"))
         except Exception:
             return
+        if isinstance(data, dict) and "enc" in data:
+            data = self._decrypt_data(data)
+            if data is None:
+                if self.on_dm:
+                    self.on_dm("🔒", "🔒", "收到加密消息（未设置口令或口令不匹配）")
+                return
         sender = data.get("cid", "")
         if not sender or sender == self.cid:
             return
@@ -915,9 +960,17 @@ class MqttBackend:
             return
         if idx in r["received"]:
             return
+        piece = raw[17:]
+        if r.get("enc"):
+            if self.fernet is None:
+                return
+            try:
+                piece = self.fernet.decrypt(piece)
+            except Exception:
+                return
         try:
             r["fh"].seek(idx * CHUNK_SIZE)
-            r["fh"].write(raw[17:])
+            r["fh"].write(piece)
         except Exception:
             return
         r["received"].add(idx)
@@ -1105,6 +1158,8 @@ class MqttBackend:
         if not text or room not in self.rooms or not self.online or self._client is None:
             return False
         payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid}, ensure_ascii=False)
+        if self.fernet is not None:
+            payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(self._topic_room(room) + "/msg", payload, qos=1)
         self._fire_text(room, self.nickname, text, True)
         return True
@@ -1114,6 +1169,8 @@ class MqttBackend:
         if not text or not self.online or self._client is None or not target_cid:
             return False
         payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid}, ensure_ascii=False)
+        if self.fernet is not None:
+            payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(f"{self.NS}/dms/{target_cid}", payload, qos=1)
         return True
 
@@ -1147,10 +1204,12 @@ class MqttBackend:
         self._pending[tid] = {
             "name": name, "size": size, "mime": mime, "total": total,
             "md5": md5, "path": path, "room": room,
-            "accepted": False, "evt": threading.Event(),
+            "accepted": False, "evt": threading.Event(), "enc": self.fernet is not None,
         }
         offer = {"kind": "offer", "id": tid, "from": self.cid, "sname": self.nickname,
                  "name": name, "size": size, "mime": mime, "total": total, "md5": md5}
+        if self.fernet is not None:
+            offer["enc"] = True
         self._publish_ctrl(room, offer)
         threading.Thread(target=self._watch_send, args=(tid,), daemon=True).start()
         self._fire_file(room, "waiting", {"name": name, "size": size})
@@ -1161,6 +1220,9 @@ class MqttBackend:
         if data is None:
             return
         room = data.get("room")
+        if data.get("enc") and self.fernet is None:
+            self._fire_file(room, "error", {"name": data["name"], "msg": "对方发送了加密文件，但你未设置加密口令"})
+            return
         d = DOWNLOADS_DIR
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, ".p2pchat-part-" + tid)
@@ -1173,7 +1235,7 @@ class MqttBackend:
             "name": data["name"], "size": data["size"], "mime": data["mime"],
             "total": data["total"], "md5": data["md5"],
             "received": set(), "got": 0, "fh": fh, "tmp": tmp,
-            "sname": data.get("sname", "对方"), "room": room,
+            "sname": data.get("sname", "对方"), "room": room, "enc": data.get("enc"),
         }
         threading.Thread(target=self._watch_recv, args=(tid,), daemon=True).start()
         self._publish_ctrl(room, {"kind": "accept", "id": tid, "from": self.cid, "to": data["from"]})
@@ -1225,6 +1287,8 @@ class MqttBackend:
                 piece = fh.read(CHUNK_SIZE)
                 if not piece:
                     break
+                if p.get("enc") and self.fernet is not None:
+                    piece = self.fernet.encrypt(piece)
                 frame = b"C" + tid.encode("ascii") + struct.pack(">I", i) + piece
                 try:
                     self._client.publish(data_topic, frame, qos=1)
@@ -1292,6 +1356,7 @@ class ChatApp:
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
         self._history_expanded = False  # 是否已展开“更早消息”
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
+        self.encrypt_pass = str(_load_settings().get("encrypt_pass", "") or "")
 
         self.root.title("P2P 聊天")
         saved_geo = str(_load_settings().get("window_geometry", "") or "").strip()
@@ -1477,6 +1542,8 @@ class ChatApp:
             self._sound_var = tk.BooleanVar(value=self.notify_sound)
             settings_menu.add_checkbutton(label="新消息提示音", variable=self._sound_var,
                                           command=self._toggle_notify_sound)
+            settings_menu.add_separator()
+            settings_menu.add_command(label="加密口令…", command=self._set_encrypt_pass)
             menubar.add_cascade(label="设置", menu=settings_menu)
             help_menu = tk.Menu(menubar, tearoff=0)
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
@@ -1497,6 +1564,28 @@ class ChatApp:
     def _toggle_notify_sound(self):
         self.notify_sound = bool(self._sound_var.get())
         _update_settings("notify_sound", self.notify_sound)
+
+    def _set_encrypt_pass(self):
+        """设置端到端加密口令：留空则关闭加密。双方需用相同口令才能互看消息。"""
+        try:
+            from tkinter import simpledialog
+            cur = self.encrypt_pass or ""
+            v = simpledialog.askstring(
+                "加密口令",
+                "设置端到端加密口令（留空则关闭加密）：\n\n"
+                "同一房间 / 私聊的双方必须使用相同口令，\n"
+                "否则互相只能看到「🔒 加密消息」。",
+                initialvalue=cur)
+            if v is None:
+                return
+            v = v.strip()
+            self.encrypt_pass = v
+            _update_settings("encrypt_pass", v)
+            if self.backend:
+                self.backend.fernet = _derive_fernet(v)
+            self._set_status("已开启端到端加密" if v else "已关闭端到端加密", "ok")
+        except Exception:
+            pass
 
     def _auto_connect_on_startup(self):
         if not (self.backend and self.backend.running):
@@ -2210,6 +2299,7 @@ class ChatApp:
             on_file=self._cb_file,
             on_status=self._cb_status,
             on_dm=self._cb_dm,
+            passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
             self.backend.add_room(room)

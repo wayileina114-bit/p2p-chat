@@ -22,6 +22,7 @@ REQS = [
     ("Pillow",         "Pillow",         "PIL",              "图片显示与预览"),
     ("customtkinter",  "customtkinter",  "customtkinter",    "圆角现代界面"),
     ("tkinterdnd2",    "tkinterdnd2",    "tkinterdnd2",      "拖拽发送文件/图片"),
+    ("cryptography",   "cryptography",   "cryptography",     "端到端加密（可选）"),
 ]
 
 

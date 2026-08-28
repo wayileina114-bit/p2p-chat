@@ -97,12 +97,3 @@ python launcher.py --cli    # 命令行自检（缺依赖自动装）
 ## 六、安全说明
 
 消息与文件走公共服务器中转，**明文传输**，正常聊天没问题，**不要传敏感/私密内容**。可加端到端加密（AES）再扩展。
-
-## 七、关于 apk（Android）
-
-Python 代码无法直接变成 apk，且需在 Linux/macOS 或云端编译。可行路线：
-
-1. **Kivy + Buildozer**：用 Python + Kivy 重写 GUI，GitHub Actions 免费云端打包成 apk；
-2. **网页版（PWA）**：做成网页，手机浏览器直接可用，再用 Capacitor/TWA 包成 apk。
-
-需要哪种，告诉我即可继续。

@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.1.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.2.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1033,6 +1033,7 @@ class ChatApp:
         try:
             menubar = tk.Menu(self.root)
             help_menu = tk.Menu(menubar, tearoff=0)
+            help_menu.add_command(label="检查更新", command=self._manual_check_update)
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
             help_menu.add_command(label="打开收件文件夹", command=self._open_downloads)
@@ -1137,6 +1138,36 @@ class ChatApp:
             self.root.wait_window(dlg.top)
         except Exception:
             pass
+
+    def _manual_check_update(self):
+        """手动检查更新：带明确结果反馈（已最新 / 发现新版 / 失败）。"""
+        import urllib.request
+
+        def work():
+            try:
+                url = (f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}"
+                       f"/releases/latest")
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "P2PChat-App",
+                    "Accept": "application/vnd.github+json",
+                })
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = json.loads(r.read().decode("utf-8", "replace"))
+                latest = str(data.get("tag_name", "")).lstrip("vV").strip()
+                if latest and self._is_newer(latest, APP_VERSION):
+                    body = (str(data.get("body", "")).strip()
+                            .replace("\r\n", "\n").replace("\r", "\n"))
+                    notes = data.get("html_url", "")
+                    self.root.after(0, lambda: self._prompt_update(latest, body, notes))
+                else:
+                    self.root.after(0, lambda: self._set_status(
+                        f"已是最新版本 v{APP_VERSION}", "#1a7f37"))
+            except Exception:
+                self.root.after(0, lambda: self._set_status(
+                    "检查更新失败，请稍后重试", "#c0392b"))
+
+        self._set_status("正在检查更新…", "#9aa0ab")
+        threading.Thread(target=work, daemon=True).start()
 
     # --------------------------- 会话管理 ---------------------------
 
@@ -1893,7 +1924,7 @@ class LoginDialog:
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("登录 · P2P 聊天")
-        top.geometry("460x500")
+        top.geometry("460x540")
         top.resizable(False, False)
         top.transient(master)
         top.configure(fg_color="#f5f7fb")
@@ -1903,54 +1934,53 @@ class LoginDialog:
             pass
         top.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        ctk.CTkLabel(top, text="P2P 聊天", font=(FONT, 24, "bold"),
-                     text_color="#1d1d1f").pack(pady=(30, 4))
-        ctk.CTkLabel(top, text="设置你的头像和昵称，然后进入聊天",
-                     font=(FONT, 13), text_color="#8a8f99").pack()
+        ctk.CTkLabel(top, text="P2P 聊天", font=(FONT, 22, "bold"),
+                     text_color="#1d1d1f").pack(pady=(22, 2))
+        ctk.CTkLabel(top, text="设置头像与昵称，即可进入聊天",
+                     font=(FONT, 12), text_color="#8a8f99").pack(pady=(0, 10))
 
-        # 头像卡片（居中）
-        avatar_card = ctk.CTkFrame(top, corner_radius=20, fg_color="#ffffff")
-        avatar_card.pack(padx=40, pady=(24, 0), fill="x")
-        self.thumb = ctk.CTkLabel(avatar_card, text="", width=104, height=104,
-                                  corner_radius=52, fg_color="#e2e6ee")
-        self.thumb.pack(pady=(22, 10))
+        # 头像（紧凑居中）
+        self.thumb = ctk.CTkLabel(top, text="", width=88, height=88,
+                                  corner_radius=44, fg_color="#e2e6ee")
+        self.thumb.pack()
         self._render_avatar()
-        ctk.CTkButton(avatar_card, text="更换头像", width=120, height=32, corner_radius=16,
-                      font=(FONT, 12), fg_color="#3a4150", hover_color="#2c323e",
-                      command=self._choose_avatar).pack(pady=(0, 20))
+        ctk.CTkButton(top, text="更换头像", width=110, height=28, corner_radius=14,
+                      font=(FONT, 11), fg_color="#3a4150", hover_color="#2c323e",
+                      command=self._choose_avatar).pack(pady=(6, 10))
 
-        # 表单卡片：昵称 + 用户ID
-        form = ctk.CTkFrame(top, corner_radius=20, fg_color="#ffffff")
-        form.pack(padx=40, pady=(14, 0), fill="x")
-
-        ctk.CTkLabel(form, text="昵称", width=52, anchor="w", text_color="#5b6372",
-                     font=(FONT, 12, "bold")).pack(anchor="w", padx=20, pady=(18, 6))
+        # 昵称
+        ctk.CTkLabel(top, text="昵称", anchor="w", font=(FONT, 12, "bold"),
+                     text_color="#5b6372").pack(anchor="w", padx=56, pady=(2, 4))
         self.name_var = ctk.StringVar(value=self.name)
-        ctk.CTkEntry(form, textvariable=self.name_var, height=40, corner_radius=12,
-                     border_width=0, fg_color="#f2f4f8", font=(FONT, 13),
-                     placeholder_text="输入你的昵称").pack(fill="x", padx=20)
+        self.name_entry = ctk.CTkEntry(top, textvariable=self.name_var, height=38,
+                                       corner_radius=12, border_width=0,
+                                       fg_color="#ffffff", font=(FONT, 13),
+                                       placeholder_text="输入你的昵称")
+        self.name_entry.pack(fill="x", padx=56)
 
-        ctk.CTkLabel(form, text="用户 ID", width=52, anchor="w", text_color="#5b6372",
-                     font=(FONT, 12, "bold")).pack(anchor="w", padx=20, pady=(14, 6))
-        id_row = ctk.CTkFrame(form, fg_color="#f2f4f8", corner_radius=12)
-        id_row.pack(fill="x", padx=20)
+        # 用户 ID
+        ctk.CTkLabel(top, text="用户 ID", anchor="w", font=(FONT, 12, "bold"),
+                     text_color="#5b6372").pack(anchor="w", padx=56, pady=(10, 4))
+        id_row = ctk.CTkFrame(top, fg_color="#ffffff", corner_radius=12)
+        id_row.pack(fill="x", padx=56)
         ctk.CTkLabel(id_row, text=self.cid, text_color="#1f6feb",
                      font=("Consolas", 11), anchor="w",
-                     wraplength=210).pack(side="left", fill="x", expand=True, padx=14, pady=12)
-        self.copy_btn = ctk.CTkButton(id_row, text="复制", width=60, height=30, corner_radius=10,
-                                      font=(FONT, 12), command=self._copy_id)
-        self.copy_btn.pack(side="right", padx=8)
+                     wraplength=210).pack(side="left", fill="x", expand=True, padx=12, pady=9)
+        self.copy_btn = ctk.CTkButton(id_row, text="复制", width=56, height=26, corner_radius=8,
+                                      font=(FONT, 11), command=self._copy_id)
+        self.copy_btn.pack(side="right", padx=6)
 
-        ctk.CTkLabel(form, text="把用户 ID 告诉别人，即可与你私聊",
-                     text_color="#b0b4bd", font=(FONT, 10), anchor="w"
-                     ).pack(anchor="w", padx=20, pady=(8, 18))
-
-        ctk.CTkButton(top, text="进入聊天", height=46, corner_radius=14,
+        # 进入按钮（底部固定；固定窗口高度已预留充足余量，按钮不会溢出）
+        ctk.CTkButton(top, text="进入聊天", height=44, corner_radius=12,
                       font=(FONT, 14, "bold"), command=self._enter
-                      ).pack(fill="x", padx=40, pady=(16, 0))
+                      ).pack(fill="x", padx=56, pady=(16, 18))
+
+        if self.name:
+            self.name_entry.focus_set()
+            self.name_entry.icursor("end")
 
     def _render_avatar(self):
-        img = _load_ctk_image(self.avatar, 104, 104) if self.avatar else None
+        img = _load_ctk_image(self.avatar, 88, 88) if self.avatar else None
         if img is not None:
             self.thumb.configure(image=img, text="")
             self._img_ref = img
@@ -1981,7 +2011,7 @@ class LoginDialog:
             pass
 
     def _enter(self):
-        self.name = self.name_var.get().strip()
+        self.name = self.name_var.get().strip() or "未命名"
         _save_profile(self.name, self.avatar)
         self.ok = True
         self.top.destroy()

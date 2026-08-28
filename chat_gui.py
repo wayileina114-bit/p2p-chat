@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1575,6 +1575,7 @@ class ChatApp:
         self.input_box.bind("<Return>", self._on_enter)
         self.input_box.bind("<Control-v>", self._on_paste)
         self.input_box.bind("<Control-V>", self._on_paste)
+        self.input_box.bind("<KeyRelease>", self._on_input_key)
         self.input_box.bind("<FocusIn>", self._on_input_focus_in)
         self.input_box.bind("<FocusOut>", self._on_input_focus_out)
         if _DND_READY:
@@ -2452,6 +2453,91 @@ class ChatApp:
         except Exception:
             pass
         return "break"
+
+    def _mention_names(self):
+        """可 @ 的成员：当前房间在线成员 + 在线名单（去重）。"""
+        names = []
+        seen = set()
+        s = self._sessions.get(self._current)
+        room = s.get("room") if s else None
+        for p in self._peers.values():
+            n = str(p.get("name", "")).strip()
+            if not n or n in seen:
+                continue
+            if room is None or room in (p.get("rooms") or []):
+                names.append(n)
+                seen.add(n)
+        for p in self._peers.values():
+            n = str(p.get("name", "")).strip()
+            if n and n not in seen:
+                names.append(n)
+                seen.add(n)
+        return names
+
+    def _on_input_key(self, event):
+        """检测 @ 输入并弹出成员提及面板。"""
+        if event.keysym in ("Up", "Down", "Return", "Escape", "Left", "Right", "BackSpace"):
+            return
+        try:
+            text = self.input_box.get("1.0", "insert")
+            at = text.rfind("@")
+            if at < 0:
+                self._close_mention_panel()
+                return
+            partial = text[at + 1:]
+            if " " in partial or "\n" in partial:
+                self._close_mention_panel()
+                return
+            self._open_mention_panel(partial)
+        except Exception:
+            pass
+
+    def _open_mention_panel(self, partial):
+        names = self._mention_names()
+        matches = [n for n in names if partial.lower() in n.lower()]
+        if not matches:
+            self._close_mention_panel()
+            return
+        if getattr(self, "_mention_win", None) is None or not self._mention_win.winfo_exists():
+            self._mention_win = ctk.CTkToplevel(self.root)
+            self._mention_win.overrideredirect(True)
+            self._mention_win.configure(fg_color=C("panel"))
+            self._mention_win.attributes("-topmost", True)
+            self._mention_frame = ctk.CTkFrame(self._mention_win, fg_color="transparent")
+            self._mention_frame.pack(padx=4, pady=4)
+        for w in self._mention_frame.winfo_children():
+            w.destroy()
+        for n in matches[:8]:
+            ctk.CTkButton(self._mention_frame, text="@" + n, height=26, corner_radius=6,
+                          fg_color="transparent", hover_color=C("hover"), text_color=C("text"),
+                          font=(FONT, 11), anchor="w",
+                          command=lambda nm=n: self._insert_mention(nm)).pack(fill="x", pady=1)
+        self._mention_win.update_idletasks()
+        w = self._mention_win.winfo_reqwidth()
+        h = self._mention_win.winfo_reqheight()
+        x = self.input_box.winfo_rootx()
+        y = self.input_box.winfo_rooty() - h - 6
+        self._mention_win.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _insert_mention(self, name):
+        try:
+            text = self.input_box.get("1.0", "insert")
+            at = text.rfind("@")
+            if at >= 0:
+                self.input_box.delete(f"1.0 + {at} chars", "insert")
+                self.input_box.insert("insert", "@" + name + " ")
+        except Exception:
+            pass
+        self._close_mention_panel()
+        self.input_box.focus_set()
+
+    def _close_mention_panel(self):
+        if getattr(self, "_mention_win", None) is not None:
+            try:
+                self._mention_win.destroy()
+            except Exception:
+                pass
+            self._mention_win = None
 
     def _on_enter(self, event):
         if event.state & 0x0001:     # Shift+回车 = 换行

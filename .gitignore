@@ -11,6 +11,13 @@ build/
 dist/
 installer/*.exe
 
+# 运行时数据（用户本地聊天记录 / 头像 / 下载文件，不上传）
+history/
+downloads/
+
+# 临时诊断文件
+_diag*.py
+
 # 系统/编辑器
 Thumbs.db
 .DS_Store

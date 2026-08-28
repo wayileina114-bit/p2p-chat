@@ -62,9 +62,16 @@ except Exception:
     DND_FILES = None
     _HAS_DND = False
 
+# 拖拽功能是否在运行时真正可用（成功后才会注册 drop target，避免 tkdnd 加载失败导致崩溃）
+_DND_READY = False
+
 # ---------------------------------------------------------------------------
 # 常量
 # ---------------------------------------------------------------------------
+
+APP_VERSION = "1.1.0"            # 程序版本（每次更新时 +1）
+UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
+UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
 DEFAULT_BROKER = "broker.emqx.io"
 DEFAULT_PORT = 1883
@@ -241,6 +248,8 @@ def _load_ctk_image(path, w, h):
 
 
 def _load_rooms():
+    _ensure_data_dir()
+    p = os.path.join(DATA_DIR, "rooms.json")
     try:
         with open(p, "r", encoding="utf-8") as f:
             arr = json.load(f)
@@ -984,9 +993,12 @@ class ChatApp:
 
         self.feed = ctk.CTkScrollableFrame(right, fg_color="transparent", corner_radius=0)
         self.feed.pack(fill="both", expand=True, padx=6, pady=2)
-        if _HAS_DND:
-            self.feed.drop_target_register(DND_FILES)
-            self.feed.dnd_bind("<<Drop>>", self._on_drop)
+        if _DND_READY:
+            try:
+                self.feed.drop_target_register(DND_FILES)
+                self.feed.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
 
         # 底部输入区
         ibar = ctk.CTkFrame(right, corner_radius=14, fg_color="#ffffff")
@@ -1000,9 +1012,12 @@ class ChatApp:
         self.input_box.bind("<Return>", self._on_enter)
         self.input_box.bind("<FocusIn>", self._on_input_focus_in)
         self.input_box.bind("<FocusOut>", self._on_input_focus_out)
-        if _HAS_DND:
-            self.input_box.drop_target_register(DND_FILES)
-            self.input_box.dnd_bind("<<Drop>>", self._on_drop)
+        if _DND_READY:
+            try:
+                self.input_box.drop_target_register(DND_FILES)
+                self.input_box.dnd_bind("<<Drop>>", self._on_drop)
+            except Exception:
+                pass
 
         btncol = ctk.CTkFrame(ibar, fg_color="transparent")
         btncol.pack(side="right", padx=(0, 14), pady=14)
@@ -1067,6 +1082,61 @@ class ChatApp:
 
     def _show_about(self):
         AboutDialog(self.root)
+
+    def check_for_update(self):
+        """后台静默检查 GitHub Releases 是否有新版本，有则弹窗提示。"""
+        import urllib.request
+
+        def work():
+            try:
+                url = (f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}"
+                       f"/releases/latest")
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "P2PChat-App",
+                    "Accept": "application/vnd.github+json",
+                })
+                with urllib.request.urlopen(req, timeout=8) as r:
+                    data = json.loads(r.read().decode("utf-8", "replace"))
+                latest = str(data.get("tag_name", "")).lstrip("vV").strip()
+                if not latest:
+                    return
+                if self._is_newer(latest, APP_VERSION):
+                    body = (str(data.get("body", "")).strip()
+                            .replace("\r\n", "\n").replace("\r", "\n"))
+                    notes = data.get("html_url", "")
+                    self.root.after(0, lambda: self._prompt_update(latest, body, notes))
+            except Exception:
+                pass  # 检查失败静默忽略，不打扰用户
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _is_newer(latest, cur):
+        """比较版本号字符串（如 1.2.0 > 1.1.0）。"""
+        def parts(s):
+            out = []
+            for tok in str(s).split("."):
+                num = ""
+                for ch in tok:
+                    if ch.isdigit():
+                        num += ch
+                    else:
+                        break
+                out.append(int(num) if num else 0)
+            return out
+        lp, cp = parts(latest), parts(cur)
+        while len(lp) < len(cp):
+            lp.append(0)
+        while len(cp) < len(lp):
+            cp.append(0)
+        return lp > cp
+
+    def _prompt_update(self, latest, body, notes):
+        try:
+            dlg = UpdateDialog(self.root, latest, body, notes)
+            self.root.wait_window(dlg.top)
+        except Exception:
+            pass
 
     # --------------------------- 会话管理 ---------------------------
 
@@ -1657,6 +1727,7 @@ class AboutDialog:
         ctk.CTkLabel(
             info,
             text=(
+                f"版本     {APP_VERSION}\n"
                 f"Python   {self.report['python']}\n"
                 f"系统     {self.report['platform']}\n"
                 f"服务器   {self.report['broker']}（免费公共 MQTT）\n"
@@ -1750,6 +1821,64 @@ class AboutDialog:
             self._append_log("\n✅ 组件已安装。部分功能需重启程序后生效。\n")
 
 
+class UpdateDialog:
+    """发现新版本时的提示框：展示版本号 / 更新内容 / 跳转下载。"""
+
+    def __init__(self, master, latest, body, notes):
+        top = ctk.CTkToplevel(master)
+        self.top = top
+        top.title("发现新版本")
+        top.geometry("480x460")
+        top.resizable(False, False)
+        top.transient(master)
+        top.configure(fg_color="#f5f7fb")
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        badge = ctk.CTkFrame(top, corner_radius=20, fg_color="#ffffff")
+        badge.pack(fill="x", padx=24, pady=(24, 12))
+        ctk.CTkLabel(badge, text="🎉", font=(FONT, 36)).pack(pady=(22, 4))
+        ctk.CTkLabel(badge, text="发现新版本", font=(FONT, 18, "bold"),
+                     text_color="#1d1d1f").pack()
+        ctk.CTkLabel(
+            badge,
+            text=f"当前 {APP_VERSION}  →  最新 {latest}",
+            font=(FONT, 12, "bold"), text_color="#1f6feb",
+        ).pack(pady=(4, 2))
+
+        body_frame = ctk.CTkFrame(top, corner_radius=16, fg_color="#ffffff")
+        body_frame.pack(fill="both", expand=True, padx=24, pady=(0, 10))
+        ctk.CTkLabel(body_frame, text="更新内容", font=(FONT, 13, "bold"),
+                     text_color="#1d1d1f", anchor="w").pack(anchor="w", padx=16, pady=(14, 4))
+        text = body.strip() if body else "（本次更新未附详细说明）"
+        body_box = ctk.CTkTextbox(body_frame, corner_radius=10, fg_color="#f7f8fb",
+                                  text_color="#3a4150", font=(FONT, 12), wrap="word",
+                                  border_width=0)
+        body_box.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+        body_box.insert("1.0", text)
+        body_box.configure(state="disabled")
+
+        btnrow = ctk.CTkFrame(top, fg_color="transparent")
+        btnrow.pack(fill="x", padx=24, pady=(0, 24))
+        ctk.CTkButton(btnrow, text="前往下载", height=40, corner_radius=12,
+                      font=(FONT, 13, "bold"),
+                      command=lambda: self._open(notes or f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}/releases")
+                      ).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(btnrow, text="稍后", width=90, height=40, corner_radius=12,
+                      fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
+                      font=(FONT, 12), command=top.destroy).pack(side="right")
+
+    def _open(self, url):
+        import webbrowser
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        self.top.destroy()
+
+
 class LoginDialog:
     """启动登录 / 资料卡：设置头像 + 昵称，展示并复制自己的用户 ID。"""
 
@@ -1764,7 +1893,7 @@ class LoginDialog:
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("登录 · P2P 聊天")
-        top.geometry("440x420")
+        top.geometry("460x500")
         top.resizable(False, False)
         top.transient(master)
         top.configure(fg_color="#f5f7fb")
@@ -1774,56 +1903,60 @@ class LoginDialog:
             pass
         top.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        ctk.CTkLabel(top, text="P2P 聊天", font=(FONT, 22, "bold"),
-                     text_color="#1d1d1f").pack(pady=(26, 2))
-        ctk.CTkLabel(top, text="设置你的头像和昵称", font=(FONT, 12),
-                     text_color="#8a8f99").pack()
+        ctk.CTkLabel(top, text="P2P 聊天", font=(FONT, 24, "bold"),
+                     text_color="#1d1d1f").pack(pady=(30, 4))
+        ctk.CTkLabel(top, text="设置你的头像和昵称，然后进入聊天",
+                     font=(FONT, 13), text_color="#8a8f99").pack()
 
-        # 头像
-        self.thumb = ctk.CTkLabel(top, text="", width=92, height=92,
-                                  corner_radius=46, fg_color="#e2e6ee")
-        self.thumb.pack(pady=(16, 6))
+        # 头像卡片（居中）
+        avatar_card = ctk.CTkFrame(top, corner_radius=20, fg_color="#ffffff")
+        avatar_card.pack(padx=40, pady=(24, 0), fill="x")
+        self.thumb = ctk.CTkLabel(avatar_card, text="", width=104, height=104,
+                                  corner_radius=52, fg_color="#e2e6ee")
+        self.thumb.pack(pady=(22, 10))
         self._render_avatar()
-        ctk.CTkButton(top, text="选择头像", width=120, height=30, corner_radius=8,
-                      font=(FONT, 11), fg_color="#3a4150", hover_color="#2c323e",
-                      command=self._choose_avatar).pack()
+        ctk.CTkButton(avatar_card, text="更换头像", width=120, height=32, corner_radius=16,
+                      font=(FONT, 12), fg_color="#3a4150", hover_color="#2c323e",
+                      command=self._choose_avatar).pack(pady=(0, 20))
 
-        # 昵称
-        row1 = ctk.CTkFrame(top, fg_color="transparent")
-        row1.pack(fill="x", padx=44, pady=(18, 0))
-        ctk.CTkLabel(row1, text="昵称", width=52, anchor="w", text_color="#5b6372",
-                     font=(FONT, 12)).pack(side="left")
+        # 表单卡片：昵称 + 用户ID
+        form = ctk.CTkFrame(top, corner_radius=20, fg_color="#ffffff")
+        form.pack(padx=40, pady=(14, 0), fill="x")
+
+        ctk.CTkLabel(form, text="昵称", width=52, anchor="w", text_color="#5b6372",
+                     font=(FONT, 12, "bold")).pack(anchor="w", padx=20, pady=(18, 6))
         self.name_var = ctk.StringVar(value=self.name)
-        ctk.CTkEntry(row1, textvariable=self.name_var, height=34, corner_radius=10,
-                     border_width=0, fg_color="#ffffff", font=(FONT, 12)
-                     ).pack(side="left", fill="x", expand=True)
+        ctk.CTkEntry(form, textvariable=self.name_var, height=40, corner_radius=12,
+                     border_width=0, fg_color="#f2f4f8", font=(FONT, 13),
+                     placeholder_text="输入你的昵称").pack(fill="x", padx=20)
 
-        # 用户 ID
-        row2 = ctk.CTkFrame(top, fg_color="transparent")
-        row2.pack(fill="x", padx=44, pady=(10, 0))
-        ctk.CTkLabel(row2, text="用户ID", width=52, anchor="w", text_color="#5b6372",
-                     font=(FONT, 12)).pack(side="left")
-        ctk.CTkLabel(row2, text=self.cid, text_color="#1f6feb",
-                     font=("Consolas", 10), anchor="w"
-                     ).pack(side="left", padx=(0, 8))
-        self.copy_btn = ctk.CTkButton(row2, text="复制", width=52, height=26, corner_radius=8,
-                                      font=(FONT, 11), command=self._copy_id)
-        self.copy_btn.pack(side="left")
+        ctk.CTkLabel(form, text="用户 ID", width=52, anchor="w", text_color="#5b6372",
+                     font=(FONT, 12, "bold")).pack(anchor="w", padx=20, pady=(14, 6))
+        id_row = ctk.CTkFrame(form, fg_color="#f2f4f8", corner_radius=12)
+        id_row.pack(fill="x", padx=20)
+        ctk.CTkLabel(id_row, text=self.cid, text_color="#1f6feb",
+                     font=("Consolas", 11), anchor="w",
+                     wraplength=210).pack(side="left", fill="x", expand=True, padx=14, pady=12)
+        self.copy_btn = ctk.CTkButton(id_row, text="复制", width=60, height=30, corner_radius=10,
+                                      font=(FONT, 12), command=self._copy_id)
+        self.copy_btn.pack(side="right", padx=8)
 
-        ctk.CTkLabel(top, text="用户 ID 是你的唯一身份，把 ID 告诉别人即可私聊你",
-                     text_color="#b0b4bd", font=(FONT, 10)).pack(pady=(6, 0))
+        ctk.CTkLabel(form, text="把用户 ID 告诉别人，即可与你私聊",
+                     text_color="#b0b4bd", font=(FONT, 10), anchor="w"
+                     ).pack(anchor="w", padx=20, pady=(8, 18))
 
-        ctk.CTkButton(top, text="进入聊天", height=42, corner_radius=12,
-                      font=(FONT, 13, "bold"), command=self._enter).pack(fill="x", padx=44, pady=(20, 0))
+        ctk.CTkButton(top, text="进入聊天", height=46, corner_radius=14,
+                      font=(FONT, 14, "bold"), command=self._enter
+                      ).pack(fill="x", padx=40, pady=(16, 0))
 
     def _render_avatar(self):
-        img = _load_ctk_image(self.avatar, 92, 92) if self.avatar else None
+        img = _load_ctk_image(self.avatar, 104, 104) if self.avatar else None
         if img is not None:
             self.thumb.configure(image=img, text="")
             self._img_ref = img
         else:
             self.thumb.configure(image=None, text="头像", text_color="#9aa0ab",
-                                 font=(FONT, 12, "bold"))
+                                 font=(FONT, 14, "bold"))
 
     def _choose_avatar(self):
         path = filedialog.askopenfilename(
@@ -1889,6 +2022,7 @@ def _ensure_deps():
 
 
 def main():
+    global _DND_READY
     if not _ensure_deps():
         return
     ctk.set_appearance_mode("light")
@@ -1897,8 +2031,9 @@ def main():
     if _HAS_DND:
         try:
             TkinterDnD.require(root)
+            _DND_READY = True
         except Exception:
-            pass
+            _DND_READY = False
     root.withdraw()  # 先隐藏主窗口，弹登录框
     login = LoginDialog(root)
     root.wait_window(login.top)
@@ -1906,7 +2041,8 @@ def main():
         root.destroy()
         return
     root.deiconify()
-    ChatApp(root, profile=login.profile, name=login.name, avatar=login.avatar)
+    app = ChatApp(root, profile=login.profile, name=login.name, avatar=login.avatar)
+    app.check_for_update()          # 进入主界面后后台静默检查更新
     root.mainloop()
 
 

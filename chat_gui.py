@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1521,6 +1521,8 @@ class ChatApp:
         self.input_box.pack(side="left", fill="x", expand=True, padx=(14, 10), pady=14)
         self.input_box.insert("1.0", HINT)
         self.input_box.bind("<Return>", self._on_enter)
+        self.input_box.bind("<Control-v>", self._on_paste)
+        self.input_box.bind("<Control-V>", self._on_paste)
         self.input_box.bind("<FocusIn>", self._on_input_focus_in)
         self.input_box.bind("<FocusOut>", self._on_input_focus_out)
         if _DND_READY:
@@ -2362,6 +2364,36 @@ class ChatApp:
             if not self.backend.send_text(s["room"], text):
                 self.input_box.insert("1.0", text)
                 self._show_system("发送失败，请检查连接。")
+
+    def _grab_clipboard_image(self):
+        """读取剪贴板中的图片（无图片则返回 None）。"""
+        try:
+            if not _HAS_PIL:
+                return None
+            from PIL import Image, ImageGrab
+            img = ImageGrab.grabclipboard()
+            return img if isinstance(img, Image.Image) else None
+        except Exception:
+            return None
+
+    def _on_paste(self, event):
+        """Ctrl+V：若剪贴板是图片则作为图片发送，否则走默认文本粘贴。"""
+        img = self._grab_clipboard_image()
+        if img is None:
+            return None
+        if not (self.backend and self.backend.online):
+            self._show_system("尚未连接，无法发送。")
+            return "break"
+        try:
+            _ensure_data_dir()
+            path = os.path.join(DATA_DIR, "paste_" + uuid.uuid4().hex[:10] + ".png")
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            img.save(path, "PNG")
+            self._do_send_file(path)
+        except Exception:
+            pass
+        return "break"
 
     def _on_enter(self, event):
         if event.state & 0x0001:     # Shift+回车 = 换行

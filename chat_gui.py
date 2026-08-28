@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1449,6 +1449,8 @@ class ChatApp:
         self._last_title = ""       # 窗口标题缓存（避免频繁重设）
         self._read_acked = set()     # 已发送过已读回执的消息 mid
         self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
+        self._search_query = ""      # 会话内消息搜索关键词（空 = 未搜索）
+        self._msg_search_after = None  # 消息搜索防抖 timer id
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1584,6 +1586,20 @@ class ChatApp:
                                        text_color=C("text"), anchor="w")
         self.chat_title.pack(fill="x", padx=16, pady=(14, 2))
 
+        # 会话内消息搜索栏（默认隐藏，Ctrl+F 打开）
+        self.search_frame = ctk.CTkFrame(right, fg_color="transparent")
+        self.search_entry = ctk.CTkEntry(self.search_frame, placeholder_text="搜索消息…",
+                                         height=30, corner_radius=8, font=(FONT, 12),
+                                         fg_color=C("input_bg"), text_color=C("text"),
+                                         border_width=0)
+        self.search_entry.pack(side="left", fill="x", expand=True, padx=(16, 6))
+        self.search_entry.bind("<KeyRelease>", self._on_search_change)
+        self.search_entry.bind("<Escape>", lambda e: self._close_search())
+        ctk.CTkButton(self.search_frame, text="✕", width=28, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), text_color=C("text_2"),
+                      hover_color=C("input_hover"), font=(FONT, 12),
+                      command=self._close_search).pack(side="left", padx=(0, 16))
+
         self.feed = ctk.CTkScrollableFrame(right, fg_color="transparent", corner_radius=0)
         self.feed.pack(fill="both", expand=True, padx=6, pady=2)
         if _DND_READY:
@@ -1614,6 +1630,10 @@ class ChatApp:
                 self.input_box.dnd_bind("<<Drop>>", self._on_drop)
             except Exception:
                 pass
+
+        # Ctrl+F 打开会话内消息搜索
+        self.root.bind("<Control-f>", self._open_search)
+        self.root.bind("<Control-F>", self._open_search)
 
         btncol = ctk.CTkFrame(ibar, fg_color="transparent")
         btncol.pack(side="right", padx=(0, 14), pady=14)
@@ -1997,6 +2017,13 @@ class ChatApp:
             return
         self._current = key
         self._history_expanded = False
+        if self._search_query:
+            self._search_query = ""
+            try:
+                self.search_frame.pack_forget()
+                self.search_entry.delete(0, "end")
+            except Exception:
+                pass
         s = self._sessions[key]
         s["unread"] = 0
         self._update_chat_title()
@@ -2215,6 +2242,13 @@ class ChatApp:
             _play_notify_sound()
         if key == self._current:
             self._stick_bottom = self._at_bottom()
+            # 正在看的会话里来了对方的消息：立即发已读回执（不用等下次重渲染）
+            if not mine and not system and mid and mid not in self._read_acked:
+                self._read_acked.add(mid)
+                if self.backend and self.backend.online:
+                    is_dm = s.get("kind") == "dm"
+                    target = s.get("cid") if is_dm else s.get("room")
+                    self.backend.send_read(target, mid, is_dm)
             if system:
                 self._render_system_line(text)
                 self._maybe_scroll_bottom()
@@ -2327,6 +2361,52 @@ class ChatApp:
         self._render_feed()
         self._apply_session_list()
         self._set_status("已清空当前会话记录", "ok")
+
+    def _open_search(self, event=None):
+        """打开会话内消息搜索栏并聚焦。"""
+        try:
+            self.search_frame.pack(fill="x", padx=8, pady=(0, 2))
+            self.search_entry.delete(0, "end")
+            self._search_query = ""
+            self.search_entry.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _close_search(self, event=None):
+        """关闭搜索并恢复完整消息列表。"""
+        self._search_query = ""
+        try:
+            self.search_frame.pack_forget()
+            self.search_entry.delete(0, "end")
+        except Exception:
+            pass
+        self._render_feed()
+        try:
+            self.input_box.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _on_search_change(self, event=None):
+        """搜索输入变化（防抖 200ms）。"""
+        if self._msg_search_after is not None:
+            try:
+                self.root.after_cancel(self._msg_search_after)
+            except Exception:
+                pass
+        self._msg_search_after = self.root.after(200, self._apply_search)
+
+    def _apply_search(self):
+        self._msg_search_after = None
+        try:
+            q = self.search_entry.get().strip()
+        except Exception:
+            q = ""
+        if q == self._search_query:
+            return
+        self._search_query = q
+        self._render_feed()
 
     def _clear_all_history(self):
         if not self._sessions:
@@ -2810,6 +2890,21 @@ class ChatApp:
         except Exception:
             pass
 
+    def _scroll_top(self):
+        """滚到顶部（搜索结果显示用）。"""
+        def _do():
+            try:
+                canvas = self.feed._parent_canvas
+                canvas.update_idletasks()
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                canvas.yview_moveto(0.0)
+            except Exception:
+                pass
+        try:
+            self.root.after(1, _do)
+        except Exception:
+            pass
+
     def _scroll_bottom(self):
         """延迟到下一帧再滚动，确保新内容布局完成、scrollregion 已更新。"""
         try:
@@ -3095,7 +3190,15 @@ class ChatApp:
                          text_color=C("text_mute"), font=(FONT, 11)).pack(pady=20)
             return
         msgs = s["messages"]
-        if len(msgs) > self.RENDER_MAX and not self._history_expanded:
+        if self._search_query:
+            q = self._search_query.lower()
+            msgs = [m for m in msgs if
+                    q in str(m.get("text", "")).lower()
+                    or q in str(m.get("name", "")).lower()
+                    or (m.get("file_path") and q in os.path.basename(str(m["file_path"])).lower())]
+            ctk.CTkLabel(self.feed, text=f"搜索「{self._search_query}」· 找到 {len(msgs)} 条（Esc 退出）",
+                         text_color=C("accent"), font=(FONT, 10, "bold")).pack(pady=6)
+        elif len(msgs) > self.RENDER_MAX and not self._history_expanded:
             remaining = len(msgs) - self.RENDER_MAX
             lbl = ctk.CTkLabel(self.feed, text=f"… 更早的 {remaining} 条消息 · 点击展开",
                                text_color=C("accent"), font=(FONT, 10, "bold"),
@@ -3122,7 +3225,10 @@ class ChatApp:
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),
                                  mid=m.get("mid"), recalled=m.get("recalled"),
                                  recalled_by=m.get("recalled_by"))
-        self._scroll_bottom()
+        if self._search_query:
+            self._scroll_top()
+        else:
+            self._scroll_bottom()
         self._ack_reads(s)
 
     def _show_image_preview(self, key, room, info):

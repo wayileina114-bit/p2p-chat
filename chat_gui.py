@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.3.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.3.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -641,6 +641,8 @@ def _norm_msg(m):
         msg["pinned"] = True
     if m.get("reply"):
         msg["reply"] = dict(m["reply"])
+    if m.get("reactions"):
+        msg["reactions"] = {k: dict(v) for k, v in m["reactions"].items()}
     if m.get("preview_tid"):
         msg["preview_tid"] = str(m["preview_tid"])
     if m.get("ts"):
@@ -774,7 +776,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, on_edit=None, passphrase=""):
+                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, on_edit=None, on_reaction=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -791,6 +793,7 @@ class MqttBackend:
         self.on_typing = on_typing
         self.on_delivered = on_delivered
         self.on_edit = on_edit
+        self.on_reaction = on_reaction
         self._delivered_acked = set()  # 已自动回过“已送达”的消息 mid
 
         self.online = False
@@ -965,6 +968,9 @@ class MqttBackend:
         if data.get("kind") == "edit":
             self._fire_edit(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("text", "")))
             return
+        if data.get("kind") == "reaction":
+            self._fire_reaction(room, str(data.get("mid", "")), str(data.get("emoji", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
+            return
         if data.get("cid") == self.cid:
             return
         self._auto_delivered(room, str(data.get("mid", "")), False)
@@ -1054,6 +1060,9 @@ class MqttBackend:
             return
         if data.get("kind") == "edit":
             self._fire_edit(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("text", "")))
+            return
+        if data.get("kind") == "reaction":
+            self._fire_reaction(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(data.get("emoji", "")), str(sender), str(data.get("name", "匿名")))
             return
         if not sender or sender == self.cid:
             return
@@ -1424,6 +1433,18 @@ class MqttBackend:
             self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
+    def send_reaction(self, target, mid, emoji, is_dm=False):
+        """对一条消息做表情回应（再次发送同一表情则取消）。"""
+        if not mid or not emoji or not self.online or self._client is None:
+            return False
+        payload = json.dumps({"kind": "reaction", "mid": mid, "emoji": str(emoji),
+                              "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
+        if is_dm:
+            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+        else:
+            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+        return True
+
     def send_file(self, room, path):
         if room not in self.rooms or not self.online or self._client is None:
             return False
@@ -1582,6 +1603,10 @@ class MqttBackend:
     def _fire_edit(self, room, mid, who, text):
         if self.on_edit:
             self.on_edit(room, mid, who, text)
+
+    def _fire_reaction(self, room, mid, emoji, cid, name):
+        if self.on_reaction:
+            self.on_reaction(room, mid, emoji, cid, name)
 
     def _fire_peers(self):
         if self.on_peers:
@@ -2971,6 +2996,7 @@ class ChatApp:
             on_typing=self._cb_typing,
             on_delivered=self._cb_delivered,
             on_edit=self._cb_edit,
+            on_reaction=self._cb_reaction,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -3248,6 +3274,9 @@ class ChatApp:
     def _cb_edit(self, room, mid, who, text):
         self.root.after(0, lambda: self._receive_edit(room, mid, who, text))
 
+    def _cb_reaction(self, room, mid, emoji, cid, name):
+        self.root.after(0, lambda: self._receive_reaction(room, mid, emoji, cid, name))
+
     def _receive_typing(self, room, name, cid):
         """收到“正在输入”状态：当前会话标题临时显示，2.5 秒后恢复。"""
         if cid == self.cid:
@@ -3304,6 +3333,58 @@ class ChatApp:
         s["online"] = True
         self._append_message(s["key"], name, text, False, mid=mid, reply=reply)
         self._schedule_session_list()
+
+    def _receive_reaction(self, room, mid, emoji, cid, name):
+        """收到表情回应：切换该表情下某人的回应（再次发送=取消）。"""
+        if not mid or not emoji or cid == self.cid:
+            return
+        if str(room).startswith("@"):
+            key = self._dm_key(str(room)[1:])
+        else:
+            key = self._group_key(room)
+        s = self._sessions.get(key)
+        if s is None:
+            return
+        for m in s["messages"]:
+            if m.get("mid") == mid:
+                react = m.setdefault("reactions", {})
+                bucket = react.setdefault(emoji, {})
+                if cid in bucket:
+                    bucket.pop(cid, None)
+                    if not bucket:
+                        react.pop(emoji, None)
+                else:
+                    bucket[cid] = name or "匿名"
+                self._save_session(s)
+                if key == self._current:
+                    self._render_feed()
+                return
+
+    def _do_reaction(self, mid, emoji):
+        """本地切换我的表情回应并广播。"""
+        if not (self.backend and self.backend.online):
+            self._set_status("未连接，无法回应", "err")
+            return
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+        if m is None:
+            return
+        is_dm = s.get("kind") == "dm"
+        target = s.get("cid") if is_dm else s.get("room")
+        react = m.setdefault("reactions", {})
+        bucket = react.setdefault(emoji, {})
+        my_name = self.nick_var.get().strip() or "未命名"
+        if self.cid in bucket:
+            bucket.pop(self.cid, None)
+            if not bucket:
+                react.pop(emoji, None)
+        else:
+            bucket[self.cid] = my_name
+        self._save_session(s)
+        self.backend.send_reaction(target, mid, emoji, is_dm)
+        self._render_feed()
 
     def _receive_edit(self, room, mid, who, text):
         """收到编辑指令：更新对应消息的正文并标记“已编辑”。"""
@@ -3715,7 +3796,7 @@ class ChatApp:
 
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
                      read_by=None, delivered_by=None, mid=None, recalled=False,
-                     recalled_by=None, edited=False, reply=None):
+                     recalled_by=None, edited=False, reply=None, reactions=None):
         if recalled:
             label = "（已撤回）" if mine else f"（{recalled_by or '对方'} 撤回了一条消息）"
             self._render_system_line(label)
@@ -3765,6 +3846,15 @@ class ChatApp:
         elif edited:
             ctk.CTkLabel(bubble, text="已编辑", text_color=C("text_mute"),
                          font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+        if reactions:
+            row = ctk.CTkFrame(bubble, fg_color="transparent")
+            row.pack(anchor="e", padx=12, pady=(0, 4))
+            for emo, bucket in reactions.items():
+                n = len(bucket) if isinstance(bucket, dict) else int(bucket)
+                if n <= 0:
+                    continue
+                ctk.CTkLabel(row, text=f"{emo} {n}", text_color=C("text_mute"),
+                             font=(FONT, 9)).pack(side="left", padx=2)
         self._maybe_scroll_bottom()
         self._trim_feed()
 
@@ -3853,6 +3943,10 @@ class ChatApp:
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text))
             if mid:
+                react_menu = tk.Menu(menu, tearoff=0)
+                for emo in ["👍", "❤️", "😂", "😮", "😢", "🙏"]:
+                    react_menu.add_command(label=emo, command=lambda e=emo: self._do_reaction(mid, e))
+                menu.add_cascade(label="回应", menu=react_menu)
                 menu.add_command(label=("取消置顶" if self._is_pinned(mid) else "置顶"),
                                  command=lambda: self._toggle_pin(mid))
             if mine and mid:
@@ -4042,7 +4136,8 @@ class ChatApp:
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),
                                  delivered_by=m.get("delivered_by"), mid=m.get("mid"),
                                  recalled=m.get("recalled"), recalled_by=m.get("recalled_by"),
-                                 edited=m.get("edited"), reply=m.get("reply"))
+                                 edited=m.get("edited"), reply=m.get("reply"),
+                                 reactions=m.get("reactions"))
         self._suppress_auto_scroll = False
         if self._search_query:
             self._scroll_top()

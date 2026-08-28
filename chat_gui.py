@@ -92,16 +92,22 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
 DEFAULT_BROKER = "broker.emqx.io"
 DEFAULT_PORT = 1883
+# 辅助公共 MQTT broker：与主 broker 并行收发文本/控制消息（多通道加速，到达重复由 mid 去重）
+AUX_BROKERS = [
+    ("broker.hivemq.com", 1883),
+    ("test.mosquitto.org", 1883),
+    ("broker.emqx.io", 1883),
+]
 CHUNK_SIZE = 512 * 1024          # 每个分片 512KB（二进制直传，更大分片减少往返次数，提速）
 LAN_PORT = 47654                  # 局域网直连监听端口（同网段文件加速，失败回退 MQTT）
 LAN_DISCOVER_PORT = 47655        # 局域网成员自动发现端口（UDP 广播）
-LAN_MSG_PORT = 47656              # 局域网常驻消息直连端口（文字/文件/语音后台自动走直连）
+LAN_MSG_PORT = 47656              # 常驻消息直连端口（双栈：IPv4 局域网 + IPv6 公网直连，后台自动走直连）
 MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
@@ -498,6 +504,49 @@ def _get_lan_ip():
         return socket.gethostbyname(socket.gethostname())
     except Exception:
         return ""
+
+
+def _is_global_v6(addr):
+    """IPv6 地址是否为全局单播（2000::/3）——排除链路本地 fe80::/10、ULA fc00::/7、
+    环回 ::1、IPv4 映射 ::ffff: 与临时区段 % 后缀。"""
+    if not addr or "%" in addr or "::ffff:" in addr.lower():
+        return False
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(addr)
+        return ip.version == 6 and ip.is_global and not ip.is_private and not ip.is_link_local
+    except Exception:
+        return False
+
+
+def _get_global_v6():
+    """探测本机 IPv6 全局地址（家庭宽带的公网 IPv6 直连用）；无公网 IPv6 返回空串。
+
+    通过向公共 IPv6 地址建一个不发数据的 UDP socket 获取本机出口地址，
+    不实际发包，纯本地探测；仅保留全局单播地址。
+    """
+    try:
+        if not socket.has_ipv6:
+            return ""
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        try:
+            s.connect(("2400:3200::1", 80))  # 公共 IPv6 DNS，仅取本机出口地址
+            addr = s.getsockname()[0]
+            if _is_global_v6(addr):
+                return addr
+        finally:
+            s.close()
+    except Exception:
+        pass
+    # 兜底：枚举本机所有 IPv6 地址找全局单播
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6):
+            addr = info[4][0]
+            if _is_global_v6(addr):
+                return addr
+    except Exception:
+        pass
+    return ""
 
 
 def _is_voice_name(name):
@@ -945,8 +994,10 @@ class MqttBackend:
         self.on_lan_peers = on_lan_peers
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms, last_seen}
         self._lan_stop_evt = threading.Event()
-        self._lan_conns = {}          # cid -> 常驻 TCP 连接（同网段直连通道，全自动维护）
+        self._lan_conns = {}          # cid -> 常驻 TCP 连接（IPv4 局域网 + IPv6 公网直连通道，全自动维护）
+        self._v6_addr = _get_global_v6()  # 本机 IPv6 全局地址（家宽公网直连加速，无则空串）
         self._seen_mids = set()       # 近期已处理的消息 mid（直连 + MQTT 双通道去重）
+        self._ctrl_seen = set()       # 控制类（撤回/已读/编辑/回应）去重键：kind:mid（与文本 mid 共用会导致撤回被吞）
         self._lan_msg_sock = None     # 常驻消息连接监听 socket
         self._lan_msg_stop = threading.Event()
         self._delivered_acked = set()  # 已自动回过“已送达”的消息 mid
@@ -955,10 +1006,12 @@ class MqttBackend:
         self.running = False
         self._connected_once = False
         self._client = None
+        self._aux_clients = []       # 辅助公共 broker 客户端（多通道文本/控制并行，加速）
         self.rooms = {}              # 房间名 -> roomid
         self._room_by_id = {}        # roomid -> 房间名
         self.presence = {}           # cid -> {"name":.., "rooms":[..]}（全局在线名单）
         self._subscribed = set()
+        self._aux_subscribed = set() # 辅助客户端已订阅的文本话题
 
         self._receivers = {}         # 接收方：tid -> 状态
         self._offers = {}            # 接收方：tid -> 对方发来的文件请求
@@ -1006,6 +1059,84 @@ class MqttBackend:
             pass
         c.will_set(self._topic_presence(), b"", qos=1, retain=True)
         return c
+
+    def _build_aux(self, broker, port):
+        """构建辅助公共 broker 客户端（多通道文本/控制并行加速，文件仍走主通道）。"""
+        try:
+            c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2,
+                            client_id=f"{self.cid}-a{len(self._aux_clients)}")
+        except (AttributeError, TypeError):
+            c = mqtt.Client(client_id=f"{self.cid}-a{len(self._aux_clients)}")
+        c.on_connect = self._on_aux_connect
+        c.on_message = self._on_message
+        c.on_disconnect = self._on_aux_disconnect
+        c.reconnect_delay_set(1, 60)
+        try:
+            c.max_inflight_messages_set(256)
+        except Exception:
+            pass
+        return c
+
+    def _try_firewall_rule(self):
+        """尝试为直连端口添加 Windows 防火墙放行规则（IPv6 公网直连需要入站放行）。
+
+        非阻塞后台执行：有管理员权限则自动放行 47654/47656 端口（TCP），
+        无权限静默跳过（可手动在「帮助 → 开放直连端口」执行）。
+        """
+        try:
+            import subprocess
+            for port in (LAN_PORT, LAN_MSG_PORT):
+                rule = f"P2PChat Direct {port}"
+                subprocess.run(
+                    ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule}"],
+                    capture_output=True, timeout=8)
+                subprocess.run(
+                    ["netsh", "advfirewall", "firewall", "add", "rule",
+                     f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
+                     f"localport={port}", "profile=any"],
+                    capture_output=True, timeout=8)
+        except Exception:
+            pass
+
+    def _on_aux_connect(self, client, userdata, flags, rc, properties=None):
+        ok = (not rc.is_failure) if hasattr(rc, "is_failure") else (rc == 0)
+        if not ok:
+            return
+        self._aux_subscribed = set()
+        client.subscribe(f"{self.NS}/presence/+", qos=1)
+        self._aux_subscribed.add(f"{self.NS}/presence/+")
+        client.subscribe(self._topic_dm(), qos=1)
+        self._aux_subscribed.add(self._topic_dm())
+        for room in list(self.rooms.keys()):
+            self._aux_subscribe_room(client, room)
+
+    def _on_aux_disconnect(self, client, userdata, *args):
+        # 辅助通道断开不改变整体在线状态（主通道仍在线）；自动重连即可
+        pass
+
+    def _aux_subscribe_room(self, client, room):
+        topic = f"{self._topic_room(room)}/msg"
+        if topic in self._aux_subscribed:
+            return
+        client.subscribe(topic, qos=1)
+        self._aux_subscribed.add(topic)
+
+    def _publish_all(self, topic, payload, qos=1, retain=False):
+        """多通道发布：主 broker + 所有在线辅助 broker（文本/控制类消息）。"""
+        sent = False
+        try:
+            if self._client is not None:
+                self._client.publish(topic, payload, qos=qos, retain=retain)
+                sent = True
+        except Exception:
+            pass
+        for c in list(self._aux_clients):
+            try:
+                if c is not None:
+                    c.publish(topic, payload, qos=qos)
+            except Exception:
+                pass
+        return sent
 
     def _on_connect(self, client, userdata, flags, rc, properties=None):
         ok = (not rc.is_failure) if hasattr(rc, "is_failure") else (rc == 0)
@@ -1108,28 +1239,34 @@ class MqttBackend:
             if data is None:
                 self._fire_text(room, "🔒", "收到加密消息（未设置口令或口令不匹配）", False)
                 return
-        if data.get("kind") == "recall":
-            self._fire_recall(room, str(data.get("mid", "")), str(data.get("cid", "")))
-            return
-        if data.get("kind") == "read":
-            self._fire_read(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
-            return
-        if data.get("kind") == "typing":
-            self._fire_typing(room, str(data.get("name", "匿名"))[:60], str(data.get("cid", "")))
-            return
-        if data.get("kind") == "delivered":
-            self._fire_delivered(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
-            return
-        if data.get("kind") == "edit":
-            self._fire_edit(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("text", "")))
-            return
-        if data.get("kind") == "reaction":
-            self._fire_reaction(room, str(data.get("mid", "")), str(data.get("emoji", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
-            return
         if data.get("cid") == self.cid:
             return
         _mid = str(data.get("mid", ""))
         if _mid and not self._check_seen(_mid):
+            return
+        kind = data.get("kind")
+        if kind in ("recall", "read", "delivered", "edit", "reaction"):
+            if not self._check_ctrl_seen(kind, _mid):
+                return
+        if kind == "recall":
+            self._fire_recall(room, _mid, str(data.get("cid", "")))
+            return
+        if kind == "read":
+            self._fire_read(room, _mid, str(data.get("cid", "")), str(data.get("name", "匿名")))
+            return
+        if kind == "typing":
+            self._fire_typing(room, str(data.get("name", "匿名"))[:60], str(data.get("cid", "")))
+            return
+        if kind == "delivered":
+            self._fire_delivered(room, _mid, str(data.get("cid", "")), str(data.get("name", "匿名")))
+            return
+        if kind == "edit":
+            self._fire_edit(room, _mid, str(data.get("cid", "")), str(data.get("text", "")))
+            return
+        if kind == "reaction":
+            self._fire_reaction(room, _mid, str(data.get("emoji", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
+            return
+        if kind not in (None, "text"):
             return
         self._auto_delivered(room, _mid, False)
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
@@ -1152,7 +1289,11 @@ class MqttBackend:
                 ts = float(data.get("ts") or time.time())
             except Exception:
                 ts = time.time()
-            self.presence[cid] = {"name": name, "rooms": [str(r)[:60] for r in rooms], "ts": ts}
+            v6 = str(data.get("v6") or "").strip()
+            self.presence[cid] = {"name": name, "rooms": [str(r)[:60] for r in rooms], "ts": ts, "v6": v6}
+            # IPv6 公网直连加速：对方有全局 IPv6 时后台自动建立常驻直连（全自动，界面不显示）
+            if v6 and self.fernet is None:
+                self._maybe_connect_v6(cid, v6)
         else:
             self.presence.pop(cid, None)
         self._fire_peers()
@@ -1204,23 +1345,30 @@ class MqttBackend:
                     self.on_dm("🔒", "🔒", "收到加密消息（未设置口令或口令不匹配）")
                 return
         sender = data.get("cid", "")
-        if data.get("kind") == "recall":
-            self._fire_recall(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender))
+        dmid = str(data.get("mid", ""))
+        kind = data.get("kind")
+        if kind in ("recall", "read", "delivered", "edit", "reaction"):
+            if not self._check_ctrl_seen(kind, dmid):
+                return
+        if kind == "recall":
+            self._fire_recall(self.DM_FILE_PREFIX + str(sender), dmid, str(sender))
             return
-        if data.get("kind") == "read":
-            self._fire_read(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("name", "匿名")))
+        if kind == "read":
+            self._fire_read(self.DM_FILE_PREFIX + str(sender), dmid, str(sender), str(data.get("name", "匿名")))
             return
-        if data.get("kind") == "typing":
+        if kind == "typing":
             self._fire_typing(self.DM_FILE_PREFIX + str(sender), str(data.get("name", "匿名"))[:60], str(sender))
             return
-        if data.get("kind") == "delivered":
-            self._fire_delivered(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("name", "匿名")))
+        if kind == "delivered":
+            self._fire_delivered(self.DM_FILE_PREFIX + str(sender), dmid, str(sender), str(data.get("name", "匿名")))
             return
-        if data.get("kind") == "edit":
-            self._fire_edit(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("text", "")))
+        if kind == "edit":
+            self._fire_edit(self.DM_FILE_PREFIX + str(sender), dmid, str(sender), str(data.get("text", "")))
             return
-        if data.get("kind") == "reaction":
-            self._fire_reaction(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(data.get("emoji", "")), str(sender), str(data.get("name", "匿名")))
+        if kind == "reaction":
+            self._fire_reaction(self.DM_FILE_PREFIX + str(sender), dmid, str(data.get("emoji", "")), str(sender), str(data.get("name", "匿名")))
+            return
+        if kind not in (None, "text"):
             return
         if not sender or sender == self.cid:
             return
@@ -1393,7 +1541,20 @@ class MqttBackend:
         self.running = True
         self._client = self._build()
         self._client.loop_start()
+        # 多通道加速：同时连接辅助公共 broker（文本/控制并行，文件仍主通道）
+        self._aux_clients = []
+        for ab, ap in AUX_BROKERS:
+            if (ab, ap) == (self.broker, self.port):
+                continue
+            try:
+                c = self._build_aux(ab, ap)
+                c.loop_start()
+                c.connect_async(ab, ap, keepalive=30)
+                self._aux_clients.append(c)
+            except Exception:
+                pass
         threading.Thread(target=self._prune_loop, daemon=True).start()
+        threading.Thread(target=self._try_firewall_rule, daemon=True).start()
         # 后台局域网成员自动发现 + 常驻直连（同网段一切通讯自动走直连）
         self._lan_stop_evt = threading.Event()
         self._lan_msg_stop = threading.Event()
@@ -1439,9 +1600,27 @@ class MqttBackend:
             self._cleanup_part(r.get("tmp"))
         self._receivers.clear()
         self.presence.clear()
+        aux = list(self._aux_clients)
+        self._aux_clients = []
         client = self._client
         self._client = None
         self.online = False
+        def _teardown_aux(c):
+            try:
+                c.disconnect()
+            except Exception:
+                pass
+            try:
+                c.loop_stop(True)
+            except TypeError:
+                try:
+                    c.loop_stop()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+        if aux:
+            threading.Thread(target=lambda: [_teardown_aux(c) for c in aux], daemon=True).start()
         if client is None:
             return
         try:
@@ -1507,9 +1686,10 @@ class MqttBackend:
         payload = json.dumps({
             "name": self.nickname,
             "rooms": list(self.rooms.keys()),
+            "v6": getattr(self, "_v6_addr", "") or _get_global_v6(),
             "ts": int(time.time()),
         }, ensure_ascii=False)
-        self._client.publish(self._topic_presence(), payload, qos=1, retain=True)
+        self._publish_all(self._topic_presence(), payload, qos=1, retain=True)
 
     def _publish_ctrl(self, room, obj):
         if self._client is None:
@@ -1535,7 +1715,7 @@ class MqttBackend:
         payload = json.dumps(obj, ensure_ascii=False)
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
-        self._client.publish(self._topic_room(room) + "/msg", payload, qos=1)
+        self._publish_all(self._topic_room(room) + "/msg", payload, qos=1)
         # 局域网直连加速：同房间的同网段成员也后台直发一份（MQTT 仍兜底，双通道去重）
         if self.fernet is None:
             for cid, p in list(self._lan_peers.items()):
@@ -1557,7 +1737,7 @@ class MqttBackend:
         payload = json.dumps(obj, ensure_ascii=False)
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
-        self._client.publish(f"{self.NS}/dms/{target_cid}", payload, qos=1)
+        self._publish_all(f"{self.NS}/dms/{target_cid}", payload, qos=1)
         # 局域网直连加速：目标同网段时后台直发一份（MQTT 兜底，双通道去重）
         if self.fernet is None:
             self._send_lan(target_cid, {"kind": "dm", "to": target_cid, "mid": mid,
@@ -1571,9 +1751,9 @@ class MqttBackend:
             return False
         payload = json.dumps({"kind": "recall", "mid": mid, "cid": self.cid}, ensure_ascii=False)
         if is_dm:
-            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+            self._publish_all(f"{self.NS}/dms/{target}", payload, qos=1)
         else:
-            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+            self._publish_all(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
     def send_read(self, target, mid, is_dm=False):
@@ -1582,9 +1762,9 @@ class MqttBackend:
             return False
         payload = json.dumps({"kind": "read", "mid": mid, "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
-            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+            self._publish_all(f"{self.NS}/dms/{target}", payload, qos=1)
         else:
-            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+            self._publish_all(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
     def send_typing(self, target, is_dm=False):
@@ -1593,9 +1773,9 @@ class MqttBackend:
             return False
         payload = json.dumps({"kind": "typing", "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
-            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=0)
+            self._publish_all(f"{self.NS}/dms/{target}", payload, qos=0)
         else:
-            self._client.publish(self._topic_room(target) + "/msg", payload, qos=0)
+            self._publish_all(self._topic_room(target) + "/msg", payload, qos=0)
         return True
 
     def send_delivered(self, target, mid, is_dm=False):
@@ -1604,9 +1784,9 @@ class MqttBackend:
             return False
         payload = json.dumps({"kind": "delivered", "mid": mid, "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
-            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+            self._publish_all(f"{self.NS}/dms/{target}", payload, qos=1)
         else:
-            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+            self._publish_all(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
     def _auto_delivered(self, room, mid, is_dm):
@@ -1626,9 +1806,9 @@ class MqttBackend:
         payload = json.dumps({"kind": "edit", "mid": mid, "cid": self.cid,
                               "text": str(new_text)[:MAX_TEXT]}, ensure_ascii=False)
         if is_dm:
-            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+            self._publish_all(f"{self.NS}/dms/{target}", payload, qos=1)
         else:
-            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+            self._publish_all(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
     def send_reaction(self, target, mid, emoji, is_dm=False):
@@ -1638,9 +1818,9 @@ class MqttBackend:
         payload = json.dumps({"kind": "reaction", "mid": mid, "emoji": str(emoji),
                               "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
         if is_dm:
-            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+            self._publish_all(f"{self.NS}/dms/{target}", payload, qos=1)
         else:
-            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+            self._publish_all(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
     def send_file(self, room, path):
@@ -1680,19 +1860,44 @@ class MqttBackend:
                  "name": name, "size": size, "mime": mime, "total": total, "md5": md5}
         if self.fernet is not None:
             offer["enc"] = True
-        # 局域网直连加速：明文文件时开启监听，同网段对方可直连（失败自动回退 MQTT）
+        # 直连加速（局域网 IPv4 + 公网 IPv6）：明文文件时开启监听，对方可直连（失败自动回退 MQTT）
         if self.fernet is None:
             try:
                 lan_ip = _get_lan_ip()
-                if lan_ip and not lan_ip.startswith("127."):
+                v6 = getattr(self, "_v6_addr", "") or _get_global_v6()
+                sock = None
+                if socket.has_ipv6:
+                    try:  # 双栈监听：IPv6 公网 + IPv4 局域网都能直连
+                        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        try:
+                            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                        except Exception:
+                            pass
+                        sock.bind(("::", LAN_PORT))
+                        sock.listen(1)
+                        self._pending[tid]["lan_sock"] = sock
+                        threading.Thread(target=self._lan_listener, args=(tid,), daemon=True).start()
+                    except Exception:
+                        try:
+                            if sock is not None:
+                                sock.close()
+                        except Exception:
+                            pass
+                        sock = None
+                if sock is None:
                     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     sock.bind(("0.0.0.0", LAN_PORT))
                     sock.listen(1)
                     self._pending[tid]["lan_sock"] = sock
+                    threading.Thread(target=self._lan_listener, args=(tid,), daemon=True).start()
+                if lan_ip and not lan_ip.startswith("127."):
                     offer["lan_ip"] = lan_ip
                     offer["lan_port"] = LAN_PORT
-                    threading.Thread(target=self._lan_listener, args=(tid,), daemon=True).start()
+                if v6 and ":" in v6:
+                    offer["v6"] = v6
+                    offer["v6_port"] = LAN_PORT
             except Exception:
                 pass
         if is_image(mime):
@@ -1712,8 +1917,15 @@ class MqttBackend:
         if data.get("enc") and self.fernet is None:
             self._fire_file(room, "error", {"name": data["name"], "msg": "对方发送了加密文件，但你未设置加密口令"})
             return
-        # 尝试局域网直连（仅明文文件；失败自动回退 MQTT）
+        # 尝试直连（IPv6 公网优先，其次局域网 IPv4；失败自动回退 MQTT）
         if not data.get("enc"):
+            v6 = data.get("v6")
+            try:
+                v6_port = int(data.get("v6_port", 0) or 0)
+            except Exception:
+                v6_port = 0
+            if v6 and ":" in v6 and v6_port and self._try_lan_receive(tid, data, v6, v6_port, room, is_v6=True):
+                return
             lan_ip = data.get("lan_ip")
             try:
                 lan_port = int(data.get("lan_port", 0) or 0)
@@ -1739,11 +1951,12 @@ class MqttBackend:
         self._publish_ctrl(room, {"kind": "accept", "id": tid, "from": self.cid, "to": data["from"]})
         self._fire_file(room, "accepting", {"name": data["name"], "size": data["size"]})
 
-    def _try_lan_receive(self, tid, data, lan_ip, lan_port, room):
-        """尝试通过局域网 TCP 直连接收；成功建立连接并启动接收线程返回 True。"""
+    def _try_lan_receive(self, tid, data, lan_ip, lan_port, room, is_v6=False):
+        """尝试通过直连（局域网 IPv4 / 公网 IPv6）TCP 接收；成功建立连接并启动接收线程返回 True。"""
         sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            fam = socket.AF_INET6 if is_v6 else socket.AF_INET
+            sock = socket.socket(fam, socket.SOCK_STREAM)
             sock.settimeout(2)
             sock.connect((lan_ip, lan_port))
             sock.settimeout(120)
@@ -1814,8 +2027,8 @@ class MqttBackend:
     def _lan_broadcast_payload(self):
         try:
             return json.dumps({"cid": self.cid, "name": self.nickname,
-                               "lan_ip": _get_lan_ip(), "rooms": list(self.rooms),
-                               "ts": time.time()}).encode("utf-8")
+                               "lan_ip": _get_lan_ip(), "v6": getattr(self, "_v6_addr", "") or _get_global_v6(),
+                               "rooms": list(self.rooms), "ts": time.time()}).encode("utf-8")
         except Exception:
             return b""
 
@@ -1919,14 +2132,26 @@ class MqttBackend:
             return
         if self.cid >= cid:  # 约定：cid 小者主动连，避免双向重复建连
             return
-        threading.Thread(target=self._lan_connect_worker, args=(cid, ip), daemon=True).start()
+        threading.Thread(target=self._lan_connect_worker, args=(cid, ip, False), daemon=True).start()
 
-    def _lan_connect_worker(self, cid, ip):
+    def _maybe_connect_v6(self, cid, v6):
+        """与公网 IPv6 成员建立常驻直连（家宽 IPv6 公网直连加速，全自动后台）。"""
+        if not cid or cid == self.cid or self.fernet is not None:
+            return
+        if not v6 or ":" not in v6:
+            return
+        if cid in self._lan_conns:
+            return
+        if self.cid >= cid:  # 约定：cid 小者主动连，避免双向重复建连
+            return
+        threading.Thread(target=self._lan_connect_worker, args=(cid, v6, True), daemon=True).start()
+
+    def _lan_connect_worker(self, cid, ip, is_v6=False):
         conn = None
         try:
-            conn = socket.create_connection((ip, LAN_MSG_PORT), timeout=2)
+            conn = socket.create_connection((ip, LAN_MSG_PORT), timeout=3)
             conn.settimeout(30)
-            conn.sendall((json.dumps({"hello": 1, "cid": self.cid}) + "\n").encode("utf-8"))
+            conn.sendall((json.dumps({"hello": 1, "cid": self.cid, "v6": is_v6}) + "\n").encode("utf-8"))
             threading.Thread(target=self._conn_reader, args=(conn,), daemon=True).start()
         except Exception:
             try:
@@ -1936,14 +2161,35 @@ class MqttBackend:
                 pass
 
     def _lan_msg_listener(self):
-        """常驻直连监听线程：接受同网段成员的主动连接。"""
+        """常驻直连监听线程：双栈（IPv4 局域网 + IPv6 公网）接受成员的主动连接。"""
+        sock = None
         try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("0.0.0.0", LAN_MSG_PORT))
-            sock.listen(8)
-            sock.settimeout(1.0)
-            self._lan_msg_sock = sock
+            if socket.has_ipv6:
+                try:
+                    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    try:
+                        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+                    except Exception:
+                        pass
+                    sock.bind(("::", LAN_MSG_PORT))
+                    sock.listen(8)
+                    sock.settimeout(1.0)
+                    self._lan_msg_sock = sock
+                except Exception:
+                    try:
+                        if sock is not None:
+                            sock.close()
+                    except Exception:
+                        pass
+                    sock = None
+            if sock is None:  # 无 IPv6 或双栈失败：回退 IPv4 监听
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                sock.bind(("0.0.0.0", LAN_MSG_PORT))
+                sock.listen(8)
+                sock.settimeout(1.0)
+                self._lan_msg_sock = sock
         except Exception:
             return
         while not self._lan_msg_stop.is_set():
@@ -2057,6 +2303,18 @@ class MqttBackend:
         if len(self._seen_mids) > 4000:
             self._seen_mids.clear()
         self._seen_mids.add(mid)
+        return True
+
+    def _check_ctrl_seen(self, kind, mid):
+        """控制类消息去重（多通道下同一控制指令会重复到达）。"""
+        if not mid:
+            return True
+        key = f"{kind}:{mid}"
+        if key in self._ctrl_seen:
+            return False
+        if len(self._ctrl_seen) > 4000:
+            self._ctrl_seen.clear()
+        self._ctrl_seen.add(key)
         return True
 
     # --------------------------- 文件发送流程 ---------------------------
@@ -2306,8 +2564,9 @@ class ChatApp:
         self._apply_session_list()
         self.root.after(1, self._render_feed)  # 延迟渲染 feed，窗口先显示，启动更快
         self._set_status("未连接", "mute")
-        self._show_system("🌸 欢迎使用 P2P 聊天！顶部输入房间名点「＋ 加入」，再点「连接」即可开聊。文字 / 图片 / 语音 / 文件都能发，同网段还自动走局域网直连加速哦～")
-        if self.auto_connect:
+        self._show_system("🌸 欢迎使用 P2P 聊天！顶部输入房间名点「＋ 加入」即自动上线常驻；或点「💌 私聊」输入对方 ID 直接开聊。文字 / 图片 / 语音 / 文件都能发，同网段自动走局域网直连加速哦～")
+        # 房间即群组：启动时存在历史房间则自动连接常驻上线
+        if self._rooms or self.auto_connect:
             self.root.after(400, self._auto_connect_on_startup)
 
     # --------------------------- UI 构建 ---------------------------
@@ -2375,11 +2634,11 @@ class ChatApp:
                                           command=self._add_room_from_input)
         self.add_room_btn.pack(side="left", pady=12, padx=(0, 8))
 
-        self.connect_btn = ctk.CTkButton(top, text="连接", width=84, height=32,
-                                         corner_radius=8, font=(FONT, 12, "bold"),
-                                         fg_color=C("accent"), hover_color=C("accent_hover"),
-                                         command=self._toggle_connect)
-        self.connect_btn.pack(side="left", pady=12, padx=(0, 8))
+        self.dm_btn = ctk.CTkButton(top, text="💌 私聊", width=84, height=32,
+                                     corner_radius=8, font=(FONT, 12, "bold"),
+                                     fg_color=C("accent"), hover_color=C("accent_hover"),
+                                     command=self._open_dm_dialog)
+        self.dm_btn.pack(side="left", pady=12, padx=(0, 8))
 
         # 状态栏
         self.status_var = ctk.StringVar(value="未连接")
@@ -2410,12 +2669,12 @@ class ChatApp:
         right = ctk.CTkFrame(body, corner_radius=12, fg_color=C("panel_2"))
         right.pack(side="left", fill="both", expand=True)
 
-        title_row = ctk.CTkFrame(right, fg_color="transparent")
-        title_row.pack(fill="x", padx=16, pady=(14, 2))
-        self.chat_title = ctk.CTkLabel(title_row, text="群聊", font=(FONT, 13, "bold"),
+        self.title_row = ctk.CTkFrame(right, fg_color="transparent")
+        self.title_row.pack(fill="x", padx=16, pady=(14, 2))
+        self.chat_title = ctk.CTkLabel(self.title_row, text="群聊", font=(FONT, 13, "bold"),
                                        text_color=C("text"), anchor="w")
         self.chat_title.pack(side="left", fill="x", expand=True)
-        self.members_btn = ctk.CTkButton(title_row, text="👥 成员", width=74, height=26,
+        self.members_btn = ctk.CTkButton(self.title_row, text="👥 成员", width=74, height=26,
                                          corner_radius=8, font=(FONT, 11),
                                          fg_color=C("input_bg"), text_color=C("text_2"),
                                          hover_color=C("input_hover"), command=self._toggle_members)
@@ -2523,6 +2782,10 @@ class ChatApp:
             settings_menu.add_separator()
             settings_menu.add_command(label="加密口令…", command=self._set_encrypt_pass)
             menubar.add_cascade(label="设置", menu=settings_menu)
+            conn_menu = tk.Menu(menubar, tearoff=0)
+            conn_menu.add_command(label="断开连接（离线）", command=self._disconnect)
+            conn_menu.add_command(label="重新连接（上线）", command=self._ensure_connected)
+            menubar.add_cascade(label="连接", menu=conn_menu)
             help_menu = tk.Menu(menubar, tearoff=0)
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
@@ -2531,6 +2794,7 @@ class ChatApp:
             help_menu.add_command(label="我的名片…", command=self._show_my_card)
             help_menu.add_command(label="扫名片…", command=self._scan_card)
             help_menu.add_command(label="网络测速…", command=self._measure_network)
+            help_menu.add_command(label="开放直连端口（需管理员）", command=self._open_firewall_ports)
             help_menu.add_command(label="备份全部数据…", command=self._backup_data)
             help_menu.add_command(label="从备份恢复…", command=self._restore_data)
             help_menu.add_separator()
@@ -2657,7 +2921,7 @@ class ChatApp:
     def _auto_connect_on_startup(self):
         if not (self.backend and self.backend.running):
             try:
-                self._toggle_connect()
+                self._ensure_connected()
             except Exception:
                 pass
 
@@ -3068,6 +3332,56 @@ class ChatApp:
         self._apply_session_list()
         self._update_window_title()
 
+    def _open_dm_dialog(self):
+        """独立私聊入口：输入对方 ID 和昵称即可开聊，无需加入同一群聊。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("发起私聊")
+            win.geometry("380x240")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="💌 发起私聊", font=(FONT, 15, "bold"),
+                         text_color=C("text")).pack(pady=(18, 4))
+            ctk.CTkLabel(win, text="输入对方的用户 ID（可让对方点「📋 复制ID」发给你）",
+                         font=(FONT, 10), text_color=C("text_mute")).pack()
+            cid_var = ctk.StringVar()
+            ctk.CTkEntry(win, textvariable=cid_var, width=260, height=32, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         placeholder_text="对方 ID", font=(FONT, 12)).pack(pady=(8, 4))
+            name_var = ctk.StringVar()
+            ctk.CTkEntry(win, textvariable=name_var, width=260, height=32, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         placeholder_text="对方昵称（可选，如 ID 已知可留空）", font=(FONT, 12)).pack(pady=4)
+
+            def _go():
+                cid = cid_var.get().strip()
+                if not cid:
+                    self._set_status("请先输入对方 ID", "err")
+                    return
+                if cid == self.cid:
+                    self._set_status("不能和自己私聊", "err")
+                    return
+                nm = name_var.get().strip()
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
+                s = self._ensure_dm_session(cid, nm or None)
+                s["online"] = cid in self._peers
+                self._switch_to(s["key"])
+                self._set_status("已进入私聊（发送即投递到对方收件箱）", "ok")
+                self._ensure_connected()
+
+            ctk.CTkButton(win, text="开始私聊", width=150, height=34, corner_radius=8,
+                          font=(FONT, 12, "bold"), fg_color=C("accent"),
+                          hover_color=C("accent_hover"), command=_go).pack(pady=(10, 4))
+            win.bind("<Return>", lambda e: _go())
+            win.bind("<Escape>", lambda e: win.destroy())
+            win.grab_set()
+            win.after(80, lambda: win.focus_force())
+        except Exception:
+            pass
+
     def _start_dm(self, cid, name):
         s = self._ensure_dm_session(cid, name)
         s["online"] = True
@@ -3109,7 +3423,7 @@ class ChatApp:
         self._members_visible = not self._members_visible
         if self._members_visible:
             try:
-                self.members_frame.pack(fill="x", padx=8, pady=(0, 2), before=self.feed)
+                self.members_frame.pack(fill="x", padx=8, pady=(0, 2), after=self.title_row)
             except Exception:
                 pass
         else:
@@ -3144,8 +3458,7 @@ class ChatApp:
                 flow = ctk.CTkFrame(self.members_frame, fg_color="transparent")
                 flow.pack(fill="x", padx=8, pady=(0, 8))
                 for cid, nm in others:
-                    label = ("🔗 " + nm) if cid in (self._lan_peers or {}) else nm
-                    ctk.CTkButton(flow, text=label, height=26, corner_radius=13,
+                    ctk.CTkButton(flow, text=nm, height=26, corner_radius=13,
                                   fg_color=C("input_bg"), text_color=C("text"),
                                   hover_color=C("input_hover"), font=(FONT, 11),
                                   command=lambda c=cid, nm=nm: self._start_dm(c, nm)).pack(side="left", padx=2, pady=2)
@@ -3518,6 +3831,7 @@ class ChatApp:
         if room in self._rooms:
             self._switch_to(self._group_key(room))
             self.room_var.set("")
+            self._ensure_connected()
             return
         self._rooms.append(room)
         _save_rooms(self._rooms)
@@ -3528,6 +3842,8 @@ class ChatApp:
         self._switch_to(self._group_key(room))
         self._refresh_room_combo()
         self.room_var.set("")
+        # 房间即群组：加入即自动连接常驻上线（后台加速通道同样由后端自动拉起）
+        self._ensure_connected()
 
     def _remove_room(self, room):
         if room not in self._rooms:
@@ -3659,6 +3975,35 @@ class ChatApp:
         except Exception:
             pass
         self._set_status("不是有效的 P2P 名片二维码", "err")
+
+    def _open_firewall_ports(self):
+        """手动开放直连端口（需管理员权限）：IPv6 公网直连需 Windows 防火墙放行。"""
+        try:
+            import subprocess
+            ok = True
+            msgs = []
+            for port in (LAN_PORT, LAN_MSG_PORT):
+                rule = f"P2PChat Direct {port}"
+                r = subprocess.run(
+                    ["netsh", "advfirewall", "firewall", "add", "rule",
+                     f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
+                     f"localport={port}", "profile=any"],
+                    capture_output=True, text=True, timeout=15)
+                msgs.append((port, r.returncode, (r.stdout or r.stderr or "").strip()))
+                if r.returncode != 0:
+                    ok = False
+            if ok:
+                self._set_status("已开放直连端口 47654/47656（IPv6 公网直连可用）", "ok")
+            else:
+                detail = "；".join(f"{p}: {c} {m[:60]}" for p, c, m in msgs if c != 0)
+                self._set_status("开放失败，请右键「以管理员身份运行」后重试", "err")
+                try:
+                    import tkinter.messagebox as mb
+                    mb.showwarning("开放端口", "需要管理员权限才能修改防火墙。\n请右键程序图标选择「以管理员身份运行」后，再点一次本菜单项。")
+                except Exception:
+                    pass
+        except Exception:
+            self._set_status("开放失败，请以管理员身份运行后重试", "err")
 
     def _measure_network(self):
         """测量到 MQTT 服务器的连接延迟（TCP 建连耗时）。"""
@@ -3857,26 +4202,26 @@ class ChatApp:
         if self.backend and self.backend.running:
             self.backend.change_nick(name)
 
-    def _toggle_connect(self):
+    def _disconnect(self):
+        """主动断开连接（房间即群组：断开后自动重新常驻上线由 _ensure_connected 兜底）。"""
         if self.backend and self.backend.running:
             self.backend.stop()
             self.backend = None
             self._peers = {}
+            self._lan_peers = {}
             for s in self._sessions.values():
                 if s["kind"] == "dm":
                     s["online"] = False
-            self.connect_btn.configure(text="连接", fg_color=C("accent"),
-                                       hover_color=C("accent_hover"))
             self._set_status("未连接", "mute")
             self._apply_session_list()
             self._update_chat_title()
-            return
 
+    def _ensure_connected(self):
+        """房间即群组：确保后端已连接并常驻上线（加入房间 / 启动 / 断开后自动重连）。"""
+        if self.backend and self.backend.running:
+            return True
         name = self.nick_var.get().strip() or "未命名"
-        # 兜底：没有房间时把当前输入框里的房间加进去
-        if not self._rooms:
-            self._add_room(self.room_var.get().strip() or "默认房间")
-        # 连接前重新加载每个房间的历史（保证断开重连历史不丢）
+        # 连接前重新加载每个房间的历史（保证重连历史不丢）
         for room in self._rooms:
             s = self._ensure_group_session(room)
             s["messages"] = _load_group_history(room, self.FEED_MAX)
@@ -3900,14 +4245,20 @@ class ChatApp:
         for room in self._rooms:
             self.backend.add_room(room)
         self.backend.start()
-        self.connect_btn.configure(text="断开", fg_color=C("danger"),
-                                   hover_color=C("err"))
         self._set_status("正在连接…", "mute")
-        if self._current is None:
+        if self._current is None and self._rooms:
             self._switch_to(self._group_key(self._rooms[0]))
         else:
             self._render_feed()
         self._apply_session_list()
+        return True
+
+    def _toggle_connect(self):
+        # 兼容旧调用：菜单“断开连接”走 _disconnect，其余一律确保连接
+        if self.backend and self.backend.running:
+            self._disconnect()
+        else:
+            self._ensure_connected()
 
     # --------------------------- 发送 ---------------------------
 
@@ -4645,11 +4996,7 @@ class ChatApp:
     def _refresh_status_bar(self):
         if self.backend and self.backend.online:
             total = len(self._peers)
-            lan = len(self._lan_peers or {})
-            if lan:
-                self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线 · 🔗 局域网 {lan} 人", "ok")
-            else:
-                self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
+            self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
         else:
             self._set_status("未连接", "mute")
 

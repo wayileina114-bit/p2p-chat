@@ -19,6 +19,10 @@ downloads/
 _diag*.py
 _smoke*.py
 _icon_preview.png
+build_stderr.txt
+build_stdout.txt
+iscc_err.txt
+iscc_out.txt
 
 # 系统 / 编辑器
 Thumbs.db

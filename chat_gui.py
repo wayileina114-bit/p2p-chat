@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.0.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.0.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1833,7 +1833,7 @@ class ChatApp:
         groups = [r for r in self._rooms if (not kw) or kw in r.lower()]
         dms = sorted([s for s in self._sessions.values()
                       if s["kind"] == "dm" and ((not kw) or kw in s["name"].lower())],
-                     key=lambda s: (0 if s["online"] else 1, s["name"]))
+                     key=lambda s: (-(s.get("unread") or 0), 0 if s["online"] else 1, s["name"]))
         online_others = [(cid, p["name"]) for cid, p in self._peers.items()
                          if cid != self.cid and cid not in dm_cids
                          and ((not kw) or kw in p["name"].lower())]
@@ -1969,6 +1969,30 @@ class ChatApp:
 
     # --------------------------- 消息追加 / 持久化 ---------------------------
 
+    def _flash_window(self):
+        """新消息到达时闪烁任务栏图标（仅 Windows，窗口获得焦点后自动停止）。"""
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+
+            class FLASHWINFO(ctypes.Structure):
+                _fields_ = [("cbSize", ctypes.c_uint),
+                            ("hwnd", ctypes.c_void_p),
+                            ("dwFlags", ctypes.c_uint),
+                            ("uCount", ctypes.c_uint),
+                            ("dwTimeout", ctypes.c_uint)]
+
+            info = FLASHWINFO()
+            info.cbSize = ctypes.sizeof(FLASHWINFO)
+            info.hwnd = self.root.winfo_id()
+            info.dwFlags = 0x00000003  # FLASHW_ALL（任务栏 + 标题栏）
+            info.uCount = 3
+            info.dwTimeout = 0
+            ctypes.windll.user32.FlashWindowEx(ctypes.byref(info))
+        except Exception:
+            pass
+
     def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False):
         s = self._sessions.get(key)
         if s is None:
@@ -2001,6 +2025,8 @@ class ChatApp:
             s["unread"] = s.get("unread", 0) + 1
             self._apply_session_list()
             self._update_window_title()
+            if not mine:
+                self._flash_window()
 
     def _save_session(self, s):
         if s["kind"] == "group":

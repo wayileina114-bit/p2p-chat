@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -189,6 +189,7 @@ THEMES = {
         "online": "#23a55a", "danger": "#f23f43",
         "warn_bg": "#3b3423", "warn_text": "#e6c86b", "section": "#949ba4",
         "mute": "#6d6f78", "ok": "#23a55a", "err": "#f23f43",
+        "search_hl": "#f0b429",
     },
     "light": {
         "app_bg": "#eef1f6", "panel": "#ffffff", "panel_2": "#f7f8fb",
@@ -201,6 +202,7 @@ THEMES = {
         "online": "#1a7f37", "danger": "#e5484d",
         "warn_bg": "#fff7e6", "warn_text": "#8a6f1a", "section": "#9aa0ab",
         "mute": "#9aa0ab", "ok": "#1a7f37", "err": "#e5484d",
+        "search_hl": "#f0b429",
     },
     "pink": {
         "app_bg": "#fff0f6", "panel": "#ffffff", "panel_2": "#ffe4ef",
@@ -213,6 +215,7 @@ THEMES = {
         "online": "#23a55a", "danger": "#e5484d",
         "warn_bg": "#fff3e6", "warn_text": "#b06a1a", "section": "#c49aad",
         "mute": "#c49aad", "ok": "#23a55a", "err": "#e5484d",
+        "search_hl": "#f0b429",
     },
 }
 
@@ -656,6 +659,54 @@ def _open_url(url):
         webbrowser.open(url)
     except Exception:
         pass
+
+IMAGE_COMPRESS_THRESHOLD = 3 * 1024 * 1024   # 大于 3MB 的图片自动压缩
+IMAGE_MAX_EDGE = 1920                         # 最长边超过 1920px 时缩小
+IMAGE_JPEG_QUALITY = 82                       # JPEG 质量
+
+
+def _is_image_path(path):
+    try:
+        return is_image(guess_mime(str(path)))
+    except Exception:
+        return False
+
+
+def _auto_compress_image(path):
+    """大图压缩：大于 3MB 或最长边超 1920px 时，生成压缩副本发送（原图不动）。
+    压缩前先检查是否已有缓存，避免重复耗时；失败时返回原路径。"""
+    try:
+        if not (_HAS_PIL and path and os.path.isfile(path)):
+            return path
+        size = os.path.getsize(path)
+        if size <= IMAGE_COMPRESS_THRESHOLD:
+            return path
+        from PIL import Image
+        img = Image.open(path)
+        w, h = img.size
+        if max(w, h) <= IMAGE_MAX_EDGE:
+            return path
+        ratio = IMAGE_MAX_EDGE / float(max(w, h))
+        img = img.resize((max(1, int(w * ratio)), max(1, int(h * ratio))), Image.LANCZOS)
+        cache_dir = os.path.join(DATA_DIR, "thumb")
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except Exception:
+            cache_dir = DATA_DIR
+        cache_key = "%s_%sx%s.jpg" % (os.path.basename(path).rsplit(".", 1)[0], img.size[0], img.size[1])
+        out = os.path.join(cache_dir, cache_key)
+        if os.path.isfile(out) and os.path.getsize(out) > 0:
+            return out
+        if img.mode not in ("RGB", "RGBA"):
+            try:
+                img = img.convert("RGB")
+            except Exception:
+                pass
+        img.save(out, "JPEG", quality=IMAGE_JPEG_QUALITY, optimize=True)
+        img.close()
+        return out if os.path.isfile(out) else path
+    except Exception:
+        return path
 
 
 def _play_notify_sound():
@@ -4759,10 +4810,12 @@ class ChatApp:
         s = self._sessions.get(self._current)
         if s is None:
             return
+        # 大图智能压缩：超过阈值的图片自动压缩后再发，大幅减少流量、加快传输（原图保留本地）
+        send_path = _auto_compress_image(path) if _is_image_path(path) else path
         if s["kind"] == "group":
-            self.backend.send_file(s["room"], path)
+            self.backend.send_file(s["room"], send_path)
         else:
-            self.backend.send_file_dm(s["cid"], path)
+            self.backend.send_file_dm(s["cid"], send_path)
 
     # --------------------------- 回调（切回主线程） ---------------------------
 
@@ -5401,12 +5454,13 @@ class ChatApp:
                             corner_radius=size // 2, fg_color=_name_color(n),
                             text_color="#ffffff", font=(FONT, 15, "bold"))
 
-    def _message_row(self, name, mine, show_head, highlight=False):
+    def _message_row(self, name, mine, show_head, highlight=False, hl_color=None):
         """创建带头像的消息行，返回气泡控件；头像仅在消息组首条显示，其余缩进对齐。
-        highlight=True 时给气泡加高亮边框（用于 @ 我的消息）。"""
+        highlight=True 时给气泡加高亮边框（@ 我的消息用 accent；搜索命中用 hl_color）。"""
         AV, GAP = 34, 8
         row = ctk.CTkFrame(self.feed, fg_color="transparent")
         row.pack(fill="x", padx=12, pady=(6 if show_head else 1))
+        bcolor = hl_color or (C("accent") if highlight else None)
         if mine:
             if show_head:
                 self._avatar_label(row, name, True, AV).pack(side="right")
@@ -5414,7 +5468,7 @@ class ChatApp:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="right")
             bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("mine_bubble"),
                                    border_width=(2 if highlight else 0),
-                                   border_color=(C("accent") if highlight else None))
+                                   border_color=bcolor)
             bubble.pack(side="right", padx=(0, GAP if show_head else 0))
         else:
             if show_head:
@@ -5423,19 +5477,22 @@ class ChatApp:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="left")
             bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("other_bubble"),
                                    border_width=(2 if highlight else 0),
-                                   border_color=(C("accent") if highlight else None))
+                                   border_color=bcolor)
             bubble.pack(side="left", padx=(GAP if show_head else 0, 0))
         return bubble
 
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
                      read_by=None, delivered_by=None, mid=None, recalled=False,
-                     recalled_by=None, edited=False, reply=None, reactions=None):
+                     recalled_by=None, edited=False, reply=None, reactions=None,
+                     search_hl=False):
         if recalled:
             label = "（已撤回）" if mine else f"（{recalled_by or '对方'} 撤回了一条消息）"
             self._render_system_line(label)
             return
         tstr = _fmt_time(ts) if ts else ""
-        bubble = self._message_row(name, mine, show_head, highlight=self._mentions_me(text))
+        bubble = self._message_row(name, mine, show_head,
+                                   highlight=self._mentions_me(text) or search_hl,
+                                   hl_color=(C("search_hl") if search_hl and not self._mentions_me(text) else None))
         if mid:
             self._bubble_frames[mid] = bubble
         if reply:
@@ -5913,7 +5970,9 @@ class ChatApp:
                                  delivered_by=m.get("delivered_by"), mid=m.get("mid"),
                                  recalled=m.get("recalled"), recalled_by=m.get("recalled_by"),
                                  edited=m.get("edited"), reply=m.get("reply"),
-                                 reactions=m.get("reactions"))
+                                 reactions=m.get("reactions"),
+                                 search_hl=bool(self._search_query and
+                                                self._search_query.lower() in str(m.get("text", "")).lower()))
         st["idx"] = end
         st["last_day"] = last_day
         st["shown_new"] = shown_new

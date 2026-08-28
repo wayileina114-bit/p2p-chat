@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.5.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.6.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1245,6 +1245,7 @@ class ChatApp:
         self._reset_input_hint()
         self._render_feed()
         self._apply_session_list()
+        self._update_window_title()
 
     def _start_dm(self, cid, name):
         s = self._ensure_dm_session(cid, name)
@@ -1379,6 +1380,7 @@ class ChatApp:
         else:
             s["unread"] = s.get("unread", 0) + 1
             self._apply_session_list()
+            self._update_window_title()
 
     def _save_session(self, s):
         if s["kind"] == "group":
@@ -1645,6 +1647,21 @@ class ChatApp:
     def _set_status(self, msg, color="#9aa0ab"):
         self.status_var.set(msg)
         self.status_label.configure(text_color=color)
+        self._update_window_title()
+
+    def _update_window_title(self):
+        # 窗口标题实时反映连接状态 + 未读消息数
+        try:
+            if self.backend and self.backend.online:
+                base = f"P2P 聊天 · 已连接 · {len(self._peers)} 人在线"
+            else:
+                base = "P2P 聊天 · 未连接"
+            unread = sum(s.get("unread", 0) for s in self._sessions.values())
+            if unread:
+                base = f"● {base}  [{unread} 条未读]"
+            self.root.title(base)
+        except Exception:
+            pass
 
     def _scroll_bottom(self):
         try:

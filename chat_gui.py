@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -603,6 +603,8 @@ def _norm_msg(m):
         msg["recalled"] = True
         if m.get("recalled_by"):
             msg["recalled_by"] = str(m["recalled_by"])
+    if m.get("edited"):
+        msg["edited"] = True
     if m.get("preview_tid"):
         msg["preview_tid"] = str(m["preview_tid"])
     if m.get("ts"):
@@ -736,7 +738,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, passphrase=""):
+                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, on_edit=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -752,6 +754,7 @@ class MqttBackend:
         self.on_read = on_read
         self.on_typing = on_typing
         self.on_delivered = on_delivered
+        self.on_edit = on_edit
         self._delivered_acked = set()  # 已自动回过“已送达”的消息 mid
 
         self.online = False
@@ -923,6 +926,9 @@ class MqttBackend:
         if data.get("kind") == "delivered":
             self._fire_delivered(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
             return
+        if data.get("kind") == "edit":
+            self._fire_edit(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("text", "")))
+            return
         if data.get("cid") == self.cid:
             return
         self._auto_delivered(room, str(data.get("mid", "")), False)
@@ -1008,6 +1014,9 @@ class MqttBackend:
             return
         if data.get("kind") == "delivered":
             self._fire_delivered(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("name", "匿名")))
+            return
+        if data.get("kind") == "edit":
+            self._fire_edit(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("text", "")))
             return
         if not sender or sender == self.cid:
             return
@@ -1358,6 +1367,18 @@ class MqttBackend:
             target = str(room)[1:] if str(room).startswith(self.DM_FILE_PREFIX) else room
         self.send_delivered(target, mid, is_dm)
 
+    def send_edit(self, target, mid, new_text, is_dm=False):
+        """编辑一条已发送的消息：向房间/私聊广播修改内容。"""
+        if not mid or not new_text or not self.online or self._client is None:
+            return False
+        payload = json.dumps({"kind": "edit", "mid": mid, "cid": self.cid,
+                              "text": str(new_text)[:MAX_TEXT]}, ensure_ascii=False)
+        if is_dm:
+            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+        else:
+            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+        return True
+
     def send_file(self, room, path):
         if room not in self.rooms or not self.online or self._client is None:
             return False
@@ -1512,6 +1533,10 @@ class MqttBackend:
     def _fire_delivered(self, room, mid, cid, name):
         if self.on_delivered:
             self.on_delivered(room, mid, cid, name)
+
+    def _fire_edit(self, room, mid, who, text):
+        if self.on_edit:
+            self.on_edit(room, mid, who, text)
 
     def _fire_peers(self):
         if self.on_peers:
@@ -2650,6 +2675,7 @@ class ChatApp:
             on_recall=self._cb_recall,
             on_typing=self._cb_typing,
             on_delivered=self._cb_delivered,
+            on_edit=self._cb_edit,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -2920,6 +2946,9 @@ class ChatApp:
     def _cb_delivered(self, room, mid, cid, name):
         self.root.after(0, lambda: self._receive_delivered(room, mid, cid, name))
 
+    def _cb_edit(self, room, mid, who, text):
+        self.root.after(0, lambda: self._receive_edit(room, mid, who, text))
+
     def _receive_typing(self, room, name, cid):
         """收到“正在输入”状态：当前会话标题临时显示，2.5 秒后恢复。"""
         if cid == self.cid:
@@ -2976,6 +3005,52 @@ class ChatApp:
         s["online"] = True
         self._append_message(s["key"], name, text, False, mid=mid)
         self._schedule_session_list()
+
+    def _receive_edit(self, room, mid, who, text):
+        """收到编辑指令：更新对应消息的正文并标记“已编辑”。"""
+        if not mid:
+            return
+        if str(room).startswith("@"):
+            key = self._dm_key(str(room)[1:])
+        else:
+            key = self._group_key(room)
+        s = self._sessions.get(key)
+        if s is None:
+            return
+        for m in s["messages"]:
+            if m.get("mid") == mid:
+                m["text"] = str(text)[:MAX_TEXT]
+                m["edited"] = True
+                self._save_session(s)
+                if key == self._current:
+                    self._render_feed()
+                return
+
+    def _do_edit(self, mid, new_text):
+        """提交一次消息编辑（本地立即更新 + 广播）。"""
+        new_text = (new_text or "").strip()
+        if not new_text:
+            self._set_status("编辑内容为空，已取消", "mute")
+            return
+        if not (self.backend and self.backend.online):
+            self._set_status("未连接，无法编辑", "err")
+            return
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        is_dm = s.get("kind") == "dm"
+        target = s.get("cid") if is_dm else s.get("room")
+        if self.backend.send_edit(target, mid, new_text, is_dm):
+            for m in s.get("messages", []):
+                if m.get("mid") == mid:
+                    m["text"] = new_text
+                    m["edited"] = True
+                    self._save_session(s)
+                    break
+            self._render_feed()
+            self._set_status("已编辑", "ok")
+        else:
+            self._set_status("编辑失败", "err")
 
     def _receive_delivered(self, room, mid, cid, name):
         """收到“已送达”回执：给对应消息标记谁已送达（未读前显示已送达）。"""
@@ -3277,7 +3352,7 @@ class ChatApp:
 
     def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
                      read_by=None, delivered_by=None, mid=None, recalled=False,
-                     recalled_by=None):
+                     recalled_by=None, edited=False):
         if recalled:
             label = "（已撤回）" if mine else f"（{recalled_by or '对方'} 撤回了一条消息）"
             self._render_system_line(label)
@@ -3301,13 +3376,16 @@ class ChatApp:
             names = "、".join(read_by[:5])
             if len(read_by) > 5:
                 names += f" 等 {len(read_by)} 人"
-            ctk.CTkLabel(bubble, text=f"已读 {names}", text_color=C("accent"),
-                         font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+            ctk.CTkLabel(bubble, text=f"已读 {names}" + (" · 已编辑" if edited else ""),
+                         text_color=C("accent"), font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
         elif mine and delivered_by:
             names = "、".join(delivered_by[:5])
             if len(delivered_by) > 5:
                 names += f" 等 {len(delivered_by)} 人"
-            ctk.CTkLabel(bubble, text=f"已送达 {names}", text_color=C("text_mute"),
+            ctk.CTkLabel(bubble, text=f"已送达 {names}" + (" · 已编辑" if edited else ""),
+                         text_color=C("text_mute"), font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
+        elif edited:
+            ctk.CTkLabel(bubble, text="已编辑", text_color=C("text_mute"),
                          font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
         self._maybe_scroll_bottom()
         self._trim_feed()
@@ -3388,6 +3466,7 @@ class ChatApp:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             if mine and mid:
+                menu.add_command(label="编辑", command=lambda: self._edit_message_dialog(mid, text))
                 menu.add_command(label="撤回", command=lambda: self._do_recall(mid))
             if file_path:
                 menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(file_path))
@@ -3398,6 +3477,33 @@ class ChatApp:
                 menu.grab_release()
             except Exception:
                 pass
+
+    def _edit_message_dialog(self, mid, text):
+        """弹出编辑消息对话框（预填原文，保存后提交编辑）。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("编辑消息")
+            win.geometry("440x230")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            box = ctk.CTkTextbox(win, width=400, height=110, corner_radius=10,
+                                 fg_color=C("input_bg"), text_color=C("text"),
+                                 font=(FONT, 12), wrap="word")
+            box.pack(padx=20, pady=(20, 10))
+            box.insert("1.0", text or "")
+            box.focus_set()
+
+            def _save():
+                new = box.get("1.0", "end").strip()
+                win.destroy()
+                self._do_edit(mid, new)
+
+            ctk.CTkButton(win, text="保存修改", width=120, height=32, corner_radius=8,
+                          font=(FONT, 12, "bold"), fg_color=C("accent"),
+                          hover_color=C("accent_hover"), command=_save).pack(pady=(0, 14))
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
 
     def _render_system_line(self, text):
         ctk.CTkLabel(self.feed, text=text, text_color=C("text_mute"), wraplength=560,
@@ -3471,7 +3577,8 @@ class ChatApp:
                 self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),
                                  delivered_by=m.get("delivered_by"), mid=m.get("mid"),
-                                 recalled=m.get("recalled"), recalled_by=m.get("recalled_by"))
+                                 recalled=m.get("recalled"), recalled_by=m.get("recalled_by"),
+                                 edited=m.get("edited"))
         self._suppress_auto_scroll = False
         if self._search_query:
             self._scroll_top()

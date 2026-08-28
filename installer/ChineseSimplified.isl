@@ -223,21 +223,17 @@ ReadyMemoGroup=开始菜单文件夹：
 ReadyMemoTasks=附加任务：
 
 ; *** TExtractionWizardPage wizard page and Extract7ZipArchive
-ExtractionLabel=正在提取附加文件...
 ButtonStopExtraction=停止提取(&S)
 StopExtraction=您确定要停止提取吗？
 ErrorExtractionAborted=提取已中止
 ErrorExtractionFailed=提取失败：%1
 
 ; *** TDownloadWizardPage wizard page and DownloadTemporaryFile
-DownloadingLabel=正在下载附加文件...
 ButtonStopDownload=停止下载(&S)
 StopDownload=您确定要停止下载吗？
 ErrorDownloadAborted=下载已中止
 ErrorDownloadFailed=下载失败：%1 %2
 ErrorDownloadSizeFailed=获取下载大小失败：%1 %2
-ErrorFileHash1=校验文件哈希失败：%1
-ErrorFileHash2=无效的文件哈希：预期 %1，实际 %2
 ErrorProgress=无效的进度：%1 / %2
 ErrorFileSize=文件大小错误：预期 %1，实际 %2
 
@@ -383,6 +379,25 @@ StatusUninstalling=正在卸载 %1...
 ; *** Shutdown block reasons
 ShutdownBlockReasonInstallingApp=正在安装 %1。
 ShutdownBlockReasonUninstallingApp=正在卸载 %1。
+VerificationSignatureDoesntExist=签名文件 "%1" 不存在
+VerificationSignatureInvalid=签名文件 "%1" 无效
+VerificationKeyNotFound=签名文件 "%1" 使用了未知密钥
+VerificationFileNameIncorrect=文件名不正确
+VerificationFileTagIncorrect=文件标记不正确
+VerificationFileSizeIncorrect=文件大小不正确
+VerificationFileHashIncorrect=文件哈希不正确
+ArchiveIncorrectPassword=压缩包密码不正确
+ArchiveIsCorrupted=压缩包已损坏
+ArchiveUnsupportedFormat=不支持的压缩包格式
+DownloadingLabel2=正在下载文件...
+ExtractingLabel=正在解压文件...
+ErrorDownloading=下载文件时发生错误：
+ErrorExtracting=解压压缩包时发生错误：
+RetryCancelSelectAction=选择操作
+RetryCancelRetry=重试(&R)
+RetryCancelCancel=取消
+SourceVerificationFailed=源文件校验失败：%1
+StatusDownloadFiles=正在下载文件...
 
 ; The custom messages below aren't used by Setup itself, but if you make
 ; use of them in your scripts, you'll want to translate them.

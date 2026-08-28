@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2228,6 +2228,7 @@ class AboutDialog:
         top.title("环境检测 / 关于")
         top.geometry("540x500")
         top.resizable(False, False)
+        top.configure(fg_color=C("app_bg"))
         top.transient(master)
         try:
             top.grab_set()
@@ -2235,9 +2236,9 @@ class AboutDialog:
             pass
 
         ctk.CTkLabel(top, text="关于 P2P 聊天 · 运行环境", font=(FONT, 15, "bold"),
-                     text_color="#1d1d1f").pack(pady=(18, 4))
+                     text_color=C("text")).pack(pady=(18, 4))
 
-        info = ctk.CTkFrame(top, fg_color="#f7f8fb", corner_radius=14)
+        info = ctk.CTkFrame(top, fg_color=C("panel_2"), corner_radius=14)
         info.pack(fill="x", padx=18, pady=(6, 10))
         ctk.CTkLabel(
             info,
@@ -2249,11 +2250,11 @@ class AboutDialog:
                 f"数据目录 {DATA_DIR}\n"
                 f"收件夹   {DOWNLOADS_DIR}"
             ),
-            justify="left", anchor="w", font=(FONT, 12), text_color="#3a4150",
+            justify="left", anchor="w", font=(FONT, 12), text_color=C("text_2"),
             wraplength=470,
         ).pack(padx=16, pady=12, anchor="w")
 
-        ctk.CTkLabel(top, text="依赖组件", font=(FONT, 13, "bold"), text_color="#1d1d1f",
+        ctk.CTkLabel(top, text="依赖组件", font=(FONT, 13, "bold"), text_color=C("text"),
                      anchor="w").pack(fill="x", padx=22, pady=(2, 2))
         self.item_frame = ctk.CTkFrame(top, fg_color="transparent")
         self.item_frame.pack(fill="x", padx=18)
@@ -2272,7 +2273,7 @@ class AboutDialog:
         self.install_btn.pack(side="left")
         ctk.CTkButton(
             btnrow, text="关闭", width=80, height=34, corner_radius=12,
-            fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
+            fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
             font=(FONT, 12), command=top.destroy).pack(side="right")
 
         if not self.report["missing"]:
@@ -2284,13 +2285,13 @@ class AboutDialog:
         for name, desc, ok in self.report["items"]:
             row = ctk.CTkFrame(self.item_frame, fg_color="transparent")
             row.pack(fill="x", pady=2)
-            color = "#0a9a5a" if ok else "#d14040"
+            color = C("ok") if ok else C("err")
             ctk.CTkLabel(row, text="✓" if ok else "✗", width=24,
                          font=(FONT, 15, "bold"), text_color=color).pack(side="left")
             ctk.CTkLabel(row, text=name if ok else name + "（缺）", width=130, anchor="w",
-                         font=(FONT, 12, "bold"), text_color="#1d1d1f").pack(side="left")
+                         font=(FONT, 12, "bold"), text_color=C("text")).pack(side="left")
             ctk.CTkLabel(row, text=desc, anchor="w", font=(FONT, 12),
-                         text_color="#5b6372").pack(side="left")
+                         text_color=C("text_mute")).pack(side="left")
 
     def _append_log(self, text):
         self.top.after(0, lambda t=text: self._do_append(t))
@@ -2346,30 +2347,30 @@ class UpdateDialog:
         top.geometry("480x480")
         top.resizable(False, False)
         top.transient(master)
-        top.configure(fg_color="#f5f7fb")
+        top.configure(fg_color=C("app_bg"))
         try:
             top.grab_set()
         except Exception:
             pass
 
-        badge = ctk.CTkFrame(top, corner_radius=20, fg_color="#ffffff")
+        badge = ctk.CTkFrame(top, corner_radius=20, fg_color=C("panel"))
         badge.pack(fill="x", padx=24, pady=(24, 12))
         ctk.CTkLabel(badge, text="🎉", font=(FONT, 36)).pack(pady=(22, 4))
         ctk.CTkLabel(badge, text="发现新版本", font=(FONT, 18, "bold"),
-                     text_color="#1d1d1f").pack()
+                     text_color=C("text")).pack()
         ctk.CTkLabel(
             badge,
             text=f"当前 {APP_VERSION}  →  最新 {latest}",
-            font=(FONT, 12, "bold"), text_color="#1f6feb",
+            font=(FONT, 12, "bold"), text_color=C("accent"),
         ).pack(pady=(4, 2))
 
-        body_frame = ctk.CTkFrame(top, corner_radius=16, fg_color="#ffffff")
+        body_frame = ctk.CTkFrame(top, corner_radius=16, fg_color=C("panel"))
         body_frame.pack(fill="both", expand=True, padx=24, pady=(0, 10))
         ctk.CTkLabel(body_frame, text="更新内容", font=(FONT, 13, "bold"),
-                     text_color="#1d1d1f", anchor="w").pack(anchor="w", padx=16, pady=(14, 4))
+                     text_color=C("text"), anchor="w").pack(anchor="w", padx=16, pady=(14, 4))
         text = body.strip() if body else "（本次更新未附详细说明）"
-        body_box = ctk.CTkTextbox(body_frame, corner_radius=10, fg_color="#f7f8fb",
-                                  text_color="#3a4150", font=(FONT, 12), wrap="word",
+        body_box = ctk.CTkTextbox(body_frame, corner_radius=10, fg_color=C("panel_2"),
+                                  text_color=C("text_2"), font=(FONT, 12), wrap="word",
                                   border_width=0)
         body_box.pack(fill="both", expand=True, padx=16, pady=(0, 6))
         body_box.insert("1.0", text)
@@ -2389,7 +2390,7 @@ class UpdateDialog:
                           font=(FONT, 13, "bold"), command=_do_download
                           ).pack(side="left", fill="x", expand=True, padx=(0, 8))
             ctk.CTkButton(btnrow, text="前往网页", width=90, height=40, corner_radius=12,
-                          fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
+                          fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                           font=(FONT, 12), command=lambda: self._open(web_url)
                           ).pack(side="right")
         else:
@@ -2397,7 +2398,7 @@ class UpdateDialog:
                           font=(FONT, 13, "bold"), command=lambda: self._open(web_url)
                           ).pack(side="left", fill="x", expand=True, padx=(0, 8))
             ctk.CTkButton(btnrow, text="稍后", width=90, height=40, corner_radius=12,
-                          fg_color="#e9ebf0", text_color="#3a4150", hover_color="#dee1e8",
+                          fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                           font=(FONT, 12), command=top.destroy).pack(side="right")
 
     def _open(self, url):

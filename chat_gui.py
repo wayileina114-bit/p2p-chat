@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -605,6 +605,8 @@ def _norm_msg(m):
             msg["recalled_by"] = str(m["recalled_by"])
     if m.get("edited"):
         msg["edited"] = True
+    if m.get("pinned"):
+        msg["pinned"] = True
     if m.get("reply"):
         msg["reply"] = dict(m["reply"])
     if m.get("preview_tid"):
@@ -3291,6 +3293,28 @@ class ChatApp:
         except Exception:
             pass
 
+    def _is_pinned(self, mid):
+        s = self._sessions.get(self._current)
+        if not s:
+            return False
+        for m in s.get("messages", []):
+            if m.get("mid") == mid:
+                return bool(m.get("pinned"))
+        return False
+
+    def _toggle_pin(self, mid):
+        """置顶 / 取消置顶一条消息。"""
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        for m in s.get("messages", []):
+            if m.get("mid") == mid:
+                m["pinned"] = not m.get("pinned", False)
+                self._save_session(s)
+                self._render_feed()
+                self._set_status("已置顶" if m["pinned"] else "已取消置顶", "ok")
+                return
+
     def _ack_reads(self, s):
         """对会话里已显示的他人消息发送已读回执（每条只发一次）。"""
         if not (self.backend and self.backend.online):
@@ -3626,6 +3650,9 @@ class ChatApp:
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text))
+            if mid:
+                menu.add_command(label=("取消置顶" if self._is_pinned(mid) else "置顶"),
+                                 command=lambda: self._toggle_pin(mid))
             if mine and mid:
                 menu.add_command(label="编辑", command=lambda: self._edit_message_dialog(mid, text))
                 menu.add_command(label="撤回", command=lambda: self._do_recall(mid))
@@ -3669,6 +3696,26 @@ class ChatApp:
     def _render_system_line(self, text):
         ctk.CTkLabel(self.feed, text=text, text_color=C("text_mute"), wraplength=560,
                      justify="center", font=(FONT, 10)).pack(pady=6)
+
+    def _render_pinned_card(self, m):
+        """置顶消息卡片：固定显示在消息列表最上方。"""
+        try:
+            card = ctk.CTkFrame(self.feed, corner_radius=10, fg_color=C("warn_bg"))
+            card.pack(fill="x", padx=12, pady=4)
+            top = ctk.CTkFrame(card, fg_color="transparent")
+            top.pack(fill="x", padx=12, pady=(6, 0))
+            ctk.CTkLabel(top, text=f"📌 置顶 · {m.get('name', '')}", text_color=C("warn_text"),
+                         font=(FONT, 10, "bold"), anchor="w").pack(side="left")
+            mid = m.get("mid")
+            ctk.CTkButton(top, text="取消置顶", width=70, height=22, corner_radius=6,
+                          fg_color=C("input_bg"), text_color=C("warn_text"),
+                          hover_color=C("input_hover"), font=(FONT, 10),
+                          command=lambda: self._toggle_pin(mid)).pack(side="right")
+            ctk.CTkLabel(card, text=str(m.get("text", ""))[:200], text_color=C("warn_text"),
+                         font=(FONT, 11), anchor="w", justify="left",
+                         wraplength=480).pack(fill="x", padx=12, pady=(2, 8))
+        except Exception:
+            pass
 
     def _show_system(self, text, target_key=None):
         target_key = target_key or self._current
@@ -3721,7 +3768,11 @@ class ChatApp:
             msgs = msgs[-self.RENDER_MAX:]
         last_day = None
         self._suppress_auto_scroll = True  # 全量渲染：逐条 auto-scroll 交给末尾一次 _scroll_bottom
+        for pm in [m for m in msgs if m.get("pinned") and not m.get("recalled")]:
+            self._render_pinned_card(pm)
         for idx, m in enumerate(msgs):
+            if m.get("pinned"):
+                continue
             ts = m.get("ts")
             dlabel = _day_label(ts) if ts else ""
             day_break = bool(dlabel and dlabel != last_day)

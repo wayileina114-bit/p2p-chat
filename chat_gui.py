@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1608,6 +1608,7 @@ class ChatApp:
         self._window_focused = True    # 窗口是否聚焦（后台/最小化时不聚焦，用于弹通知）
         self._typing_after = None      # “正在输入”提示的延时恢复 timer id
         self._typing_last = 0.0        # 上次发送“正在输入”广播的时间戳（节流用）
+        self._members_visible = False  # 成员列表面板是否展开
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -1740,9 +1741,19 @@ class ChatApp:
         right = ctk.CTkFrame(body, corner_radius=12, fg_color=C("panel_2"))
         right.pack(side="left", fill="both", expand=True)
 
-        self.chat_title = ctk.CTkLabel(right, text="群聊", font=(FONT, 13, "bold"),
+        title_row = ctk.CTkFrame(right, fg_color="transparent")
+        title_row.pack(fill="x", padx=16, pady=(14, 2))
+        self.chat_title = ctk.CTkLabel(title_row, text="群聊", font=(FONT, 13, "bold"),
                                        text_color=C("text"), anchor="w")
-        self.chat_title.pack(fill="x", padx=16, pady=(14, 2))
+        self.chat_title.pack(side="left", fill="x", expand=True)
+        self.members_btn = ctk.CTkButton(title_row, text="👥 成员", width=74, height=26,
+                                         corner_radius=8, font=(FONT, 11),
+                                         fg_color=C("input_bg"), text_color=C("text_2"),
+                                         hover_color=C("input_hover"), command=self._toggle_members)
+        self.members_btn.pack(side="right")
+
+        # 成员列表面板（默认隐藏，点「👥 成员」开关）
+        self.members_frame = ctk.CTkFrame(right, corner_radius=8, fg_color=C("panel"))
 
         # 会话内消息搜索栏（默认隐藏，Ctrl+F 打开）
         self.search_frame = ctk.CTkFrame(right, fg_color="transparent")
@@ -2208,6 +2219,47 @@ class ChatApp:
             self.chat_title.configure(text=f"群聊 · {s['name']}（{n}人在线）")
         else:
             self.chat_title.configure(text=f"私聊 · {s['name']}")
+
+    def _toggle_members(self):
+        """展开 / 收起当前会话的成员列表。"""
+        self._members_visible = not self._members_visible
+        if self._members_visible:
+            try:
+                self.members_frame.pack(fill="x", padx=8, pady=(0, 2), before=self.feed)
+            except Exception:
+                pass
+        else:
+            try:
+                self.members_frame.pack_forget()
+            except Exception:
+                pass
+        self._refresh_members()
+
+    def _refresh_members(self):
+        """刷新成员列表内容（在线成员 / 私聊对方状态）。"""
+        if not self._members_visible:
+            return
+        for w in self.members_frame.winfo_children():
+            w.destroy()
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        if s["kind"] == "group":
+            room = s["room"]
+            names = [self.nick_var.get().strip() or "未命名"]
+            for p in self._peers.values():
+                n = str(p.get("name", "")).strip()
+                if n and room in (p.get("rooms") or []) and n not in names:
+                    names.append(n)
+            ctk.CTkLabel(self.members_frame, text=f"在线成员 · {len(names)} 人",
+                         text_color=C("text_mute"), font=(FONT, 10)).pack(anchor="w", padx=10, pady=(6, 2))
+            ctk.CTkLabel(self.members_frame, text="、".join(names), wraplength=560, justify="left",
+                         text_color=C("text"), font=(FONT, 11)).pack(anchor="w", padx=10, pady=(0, 8))
+        else:
+            online = s.get("cid") in self._peers
+            ctk.CTkLabel(self.members_frame,
+                         text=f"{s.get('name', '对方')}：{'🟢 在线' if online else '⚪ 离线'}",
+                         text_color=C("text"), font=(FONT, 11)).pack(anchor="w", padx=10, pady=8)
 
     # --------------------------- 左侧会话/成员列表 ---------------------------
 
@@ -3158,6 +3210,7 @@ class ChatApp:
                 s["online"] = s["cid"] in self._peers
         self._schedule_session_list()
         self._update_chat_title()
+        self._refresh_members()
         if self.backend and self.backend.online:
             total = len(self._peers)
             self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")

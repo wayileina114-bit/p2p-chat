@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.6.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.6.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -211,25 +211,25 @@ def _save_profile(name, avatar):
 
 
 def _copy_avatar(src_path):
-    """把用户选的图片缩略后存成 history/avatar.png，返回保存路径（失败返回空）。"""
+    """把用户选的图片缩略后存成 history/avatar.png，返回保存路径（失败返回空）。
+
+    强制完整解码验证：损坏 / 截断 / 无法读取的图片直接返回空，绝不把坏图复制成头像，
+    否则下次启动加载头像时会在渲染阶段崩溃（CTkImage 惰性解码）。
+    """
     _ensure_data_dir()
     dst = os.path.join(DATA_DIR, "avatar.png")
     try:
         from PIL import Image
         img = Image.open(src_path)
+        img.load()  # 强制解码，截断/损坏图片在此抛异常
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGB")
         img.thumbnail((256, 256))
+        img = img.convert("RGB")  # 统一去掉 alpha，避免显示异常
         img.save(dst, "PNG")
         return dst
     except Exception:
-        try:
-            import shutil
-            if os.path.abspath(src_path) != os.path.abspath(dst):
-                shutil.copyfile(src_path, dst)
-            return dst
-        except Exception:
-            return ""
+        return ""
 
 
 def _load_ctk_image(path, w, h):
@@ -240,8 +240,10 @@ def _load_ctk_image(path, w, h):
         from PIL import Image
         from customtkinter import CTkImage
         img = Image.open(path)
+        img.load()  # 强制完整解码，避免惰性解码在渲染阶段才崩溃
         if img.mode not in ("RGB", "RGBA"):
             img = img.convert("RGB")
+        img = img.copy()  # 独立内存副本，避免句柄/惰性加载问题
         return CTkImage(light_image=img, dark_image=img, size=(w, h))
     except Exception:
         return None
@@ -1749,6 +1751,7 @@ class ChatApp:
         try:
             from PIL import Image  # 惰性加载
             img = Image.open(path)
+            img.load()  # 强制解码，损坏图片这里会失败而非渲染时崩溃
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGB")
             img.thumbnail((280, 280))
@@ -1898,6 +1901,7 @@ class ImagePreview:
         try:
             from PIL import Image  # 惰性加载
             img = Image.open(path)
+            img.load()  # 强制解码，损坏图片这里会失败而非渲染时崩溃
             if img.mode not in ("RGB", "RGBA", "L"):
                 img = img.convert("RGB")
             img.thumbnail((820, 600))

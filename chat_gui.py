@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -403,6 +403,23 @@ def _circular_ctk_image(path, size):
         return None
 
 
+def _make_thumb_base64(path, max_size=240, quality=62):
+    """生成图片的小缩略图并返回 base64（用于聊天内联预览）；失败返回空串。"""
+    try:
+        import base64
+        import io
+        from PIL import Image
+        img = Image.open(path)
+        img.load()
+        img = img.convert("RGB")
+        img.thumbnail((max_size, max_size))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=quality)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
+
 def _name_color(name):
     """根据昵称生成稳定的头像底色（Discord 风格彩色首字母）。"""
     palette = ["#5865f2", "#3ba55d", "#faa61a", "#ed4245", "#eb459e",
@@ -509,6 +526,10 @@ def _norm_msg(m):
         msg["file_path"] = str(m["file_path"])
     if m.get("system"):
         msg["system"] = True
+    if m.get("mid"):
+        msg["mid"] = str(m["mid"])
+    if m.get("preview_tid"):
+        msg["preview_tid"] = str(m["preview_tid"])
     if m.get("ts"):
         msg["ts"] = m["ts"]
     return msg
@@ -640,7 +661,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 passphrase=""):
+                 on_recall=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -652,6 +673,7 @@ class MqttBackend:
         self.on_file = on_file
         self.on_status = on_status
         self.on_dm = on_dm
+        self.on_recall = on_recall
 
         self.online = False
         self.running = False
@@ -810,10 +832,13 @@ class MqttBackend:
             if data is None:
                 self._fire_text(room, "🔒", "收到加密消息（未设置口令或口令不匹配）", False)
                 return
+        if data.get("kind") == "recall":
+            self._fire_recall(room, str(data.get("mid", "")), str(data.get("cid", "")))
+            return
         if data.get("cid") == self.cid:
             return
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
-                        str(data.get("text", ""))[:MAX_TEXT], False)
+                        str(data.get("text", ""))[:MAX_TEXT], False, str(data.get("mid", "")))
 
     def _handle_presence(self, topic, raw):
         cid = topic.rsplit("/", 1)[-1]
@@ -883,11 +908,14 @@ class MqttBackend:
                     self.on_dm("🔒", "🔒", "收到加密消息（未设置口令或口令不匹配）")
                 return
         sender = data.get("cid", "")
+        if data.get("kind") == "recall":
+            self._fire_recall(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender))
+            return
         if not sender or sender == self.cid:
             return
         if self.on_dm:
             self.on_dm(sender, str(data.get("name", "匿名"))[:60],
-                       str(data.get("text", ""))[:MAX_TEXT])
+                       str(data.get("text", ""))[:MAX_TEXT], str(data.get("mid", "")))
 
     # --------------------------- 文件控制 ---------------------------
 
@@ -922,6 +950,7 @@ class MqttBackend:
         self._fire_file(room, "offer", {
             "tid": tid, "name": data.get("name", "file"), "size": size,
             "mime": data.get("mime", ""), "sname": data.get("sname", "匿名"),
+            "thumb": data.get("thumb", ""),
         })
 
     def _on_accept(self, data):
@@ -1021,7 +1050,7 @@ class MqttBackend:
             return
         self._fire_file(r["room"], "done", {
             "name": safe_name, "path": path, "size": r["size"],
-            "mime": r["mime"], "sname": r.get("sname", "对方"),
+            "mime": r["mime"], "sname": r.get("sname", "对方"), "tid": tid,
         })
 
     def _watch_recv(self, tid):
@@ -1157,21 +1186,34 @@ class MqttBackend:
         text = (text or "").strip()
         if not text or room not in self.rooms or not self.online or self._client is None:
             return False
-        payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid}, ensure_ascii=False)
+        mid = uuid.uuid4().hex[:12]
+        payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}, ensure_ascii=False)
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(self._topic_room(room) + "/msg", payload, qos=1)
-        self._fire_text(room, self.nickname, text, True)
+        self._fire_text(room, self.nickname, text, True, mid)
         return True
 
     def send_dm(self, target_cid, text):
         text = (text or "").strip()
         if not text or not self.online or self._client is None or not target_cid:
             return False
-        payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid}, ensure_ascii=False)
+        mid = uuid.uuid4().hex[:12]
+        payload = json.dumps({"name": self.nickname, "text": text, "cid": self.cid, "mid": mid}, ensure_ascii=False)
         if self.fernet is not None:
             payload = json.dumps({"enc": self.fernet.encrypt(payload.encode("utf-8")).decode("ascii")})
         self._client.publish(f"{self.NS}/dms/{target_cid}", payload, qos=1)
+        return True
+
+    def send_recall(self, target, mid, is_dm=False):
+        """撤回一条消息：向房间/私聊广播撤回指令。"""
+        if not mid or not self.online or self._client is None:
+            return False
+        payload = json.dumps({"kind": "recall", "mid": mid, "cid": self.cid}, ensure_ascii=False)
+        if is_dm:
+            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+        else:
+            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
     def send_file(self, room, path):
@@ -1210,6 +1252,10 @@ class MqttBackend:
                  "name": name, "size": size, "mime": mime, "total": total, "md5": md5}
         if self.fernet is not None:
             offer["enc"] = True
+        if is_image(mime):
+            thumb = _make_thumb_base64(path)
+            if thumb:
+                offer["thumb"] = thumb
         self._publish_ctrl(room, offer)
         threading.Thread(target=self._watch_send, args=(tid,), daemon=True).start()
         self._fire_file(room, "waiting", {"name": name, "size": size})
@@ -1305,9 +1351,13 @@ class MqttBackend:
 
     # --------------------------- 回调触发 ---------------------------
 
-    def _fire_text(self, room, name, text, mine=False):
+    def _fire_text(self, room, name, text, mine=False, mid=None):
         if self.on_text:
-            self.on_text(room, name, text, mine)
+            self.on_text(room, name, text, mine, mid)
+
+    def _fire_recall(self, room, mid, who):
+        if self.on_recall:
+            self.on_recall(room, mid, who)
 
     def _fire_peers(self):
         if self.on_peers:
@@ -2111,11 +2161,15 @@ class ChatApp:
         except Exception:
             pass
 
-    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False):
+    def _append_message(self, key, name, text, mine, img_path=None, file_path=None, system=False, mid=None, preview_tid=None):
         s = self._sessions.get(key)
         if s is None:
             return
         msg = {"name": name, "text": text, "mine": mine, "ts": time.time()}
+        if mid:
+            msg["mid"] = str(mid)
+        if preview_tid:
+            msg["preview_tid"] = str(preview_tid)
         if system:
             msg["system"] = True
         if img_path:
@@ -2485,8 +2539,8 @@ class ChatApp:
 
     # --------------------------- 回调（切回主线程） ---------------------------
 
-    def _cb_text(self, room, name, text, mine):
-        self.root.after(0, lambda: self._append_message(self._group_key(room), name, text, mine))
+    def _cb_text(self, room, name, text, mine, mid=None):
+        self.root.after(0, lambda: self._append_message(self._group_key(room), name, text, mine, mid=mid))
 
     def _cb_peers(self, peers):
         self.root.after(0, lambda: self._refresh_peers(peers))
@@ -2497,13 +2551,13 @@ class ChatApp:
     def _cb_status(self, online, msg):
         self.root.after(0, lambda: self._set_status(msg, "ok" if online else "err"))
 
-    def _cb_dm(self, from_cid, name, text):
-        self.root.after(0, lambda: self._receive_dm(from_cid, name, text))
+    def _cb_dm(self, from_cid, name, text, mid=None):
+        self.root.after(0, lambda: self._receive_dm(from_cid, name, text, mid))
 
-    def _receive_dm(self, from_cid, name, text):
+    def _receive_dm(self, from_cid, name, text, mid=None):
         s = self._ensure_dm_session(from_cid, name)
         s["online"] = True
-        self._append_message(s["key"], name, text, False)
+        self._append_message(s["key"], name, text, False, mid=mid)
         self._schedule_session_list()
 
     def _refresh_peers(self, peers):
@@ -2836,6 +2890,40 @@ class ChatApp:
                                  file_path=m.get("file_path"))
         self._scroll_bottom()
 
+    def _show_image_preview(self, key, room, info):
+        """图片 offer 到达：立即显示低画质缩略图预览，并自动接收原图（QQ 式内联）。"""
+        import base64
+        try:
+            _ensure_data_dir()
+            tp = os.path.join(DATA_DIR, "thumb_" + str(info.get("tid", "x")) + ".jpg")
+            with open(tp, "wb") as f:
+                f.write(base64.b64decode(info["thumb"]))
+            sname = info.get("sname", "对方")
+            self._append_message(key, sname, f"🖼 图片：{info.get('name', '')}", False,
+                                 img_path=tp, preview_tid=info.get("tid"))
+        except Exception:
+            self._add_file_offer_card(key, room, info)
+            return
+        if self.backend:
+            self.backend.accept_file(info.get("tid"))
+
+    def _replace_preview(self, key, tid, full_path):
+        """把之前的缩略图预览替换为原图；找到并替换返回 True。"""
+        if not tid:
+            return False
+        s = self._sessions.get(key)
+        if s is None:
+            return False
+        for m in s["messages"]:
+            if m.get("preview_tid") == tid:
+                m["img_path"] = full_path
+                m.pop("preview_tid", None)
+                self._save_session(s)
+                if key == self._current:
+                    self._render_feed()
+                return True
+        return False
+
     def _show_file_event(self, room, event, info):
         if str(room).startswith("@"):
             cid = str(room)[1:]
@@ -2863,14 +2951,18 @@ class ChatApp:
                 self._append_message(key, my, f"📎 已发送文件：{name}（{fmt_size(size)}）", True,
                                      file_path=info.get("path", ""))
         elif event == "offer":
-            self._add_file_offer_card(key, room, info)
+            if is_image(mime) and info.get("thumb"):
+                self._show_image_preview(key, room, info)
+            else:
+                self._add_file_offer_card(key, room, info)
         elif event == "rejected":
             self._append_message(key, "", f"⚠️ 对方拒绝接收：{name}", False, system=True)
         elif event == "done":
             sname = info.get("sname", "对方")
             path = info.get("path", "")
             if is_image(mime):
-                self._append_message(key, sname, f"🖼 图片：{name}", False, img_path=path)
+                if not self._replace_preview(key, info.get("tid"), path):
+                    self._append_message(key, sname, f"🖼 图片：{name}", False, img_path=path)
             else:
                 self._append_message(key, sname, f"📎 已收到文件：{name}（{fmt_size(size)}）", False,
                                      file_path=path)

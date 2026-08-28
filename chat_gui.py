@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.12"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.13"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2418,15 +2418,15 @@ class ImagePreview:
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("图片预览")
-        top.configure(fg_color="#15171f")
+        top.configure(fg_color=C("app_bg"))
         top.resizable(False, False)
 
-        ctk.CTkLabel(top, text=os.path.basename(path), text_color="#aeb4c0",
+        ctk.CTkLabel(top, text=os.path.basename(path), text_color=C("text_2"),
                      font=(FONT, 11)).pack(padx=20, pady=(12, 4))
         ctk.CTkLabel(top, image=ctk_img, text="").pack(padx=24, pady=(0, 4))
         ctk.CTkButton(top, text="关闭", width=90, height=30, corner_radius=8,
-                      fg_color="#3a4150", hover_color="#2c323e",
-                      font=(FONT, 12), command=top.destroy).pack(pady=(4, 14))
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 12), command=top.destroy).pack(pady=(4, 14))
 
         # 用图片自身（逻辑）尺寸设置窗口，避免高分屏下 winfo 物理像素被误当逻辑像素导致窗口放大
         scale = 1.0
@@ -2468,6 +2468,7 @@ class AboutDialog:
         top.resizable(False, False)
         top.configure(fg_color=C("app_bg"))
         top.transient(master)
+        top.bind("<Escape>", lambda e: top.destroy())
         try:
             top.grab_set()
         except Exception:
@@ -2498,8 +2499,8 @@ class AboutDialog:
         self.item_frame.pack(fill="x", padx=18)
         self._render_items()
 
-        self.log_box = ctk.CTkTextbox(top, height=96, corner_radius=10, fg_color="#0f1220",
-                                      text_color="#c7f9cc", font=("Consolas", 11), wrap="word")
+        self.log_box = ctk.CTkTextbox(top, height=96, corner_radius=10, fg_color=C("panel_2"),
+                                      text_color=C("text_2"), font=("Consolas", 11), wrap="word")
         self.log_box.pack(fill="x", padx=18, pady=(8, 0))
         self.log_box.insert("1.0", "已检测运行环境。缺组件可点下方按钮一键安装。\n")
 
@@ -2586,6 +2587,7 @@ class UpdateDialog:
         top.resizable(False, False)
         top.transient(master)
         top.configure(fg_color=C("app_bg"))
+        top.bind("<Escape>", lambda e: top.destroy())
         try:
             top.grab_set()
         except Exception:

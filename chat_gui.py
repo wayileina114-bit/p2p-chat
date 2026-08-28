@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.13"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.14"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -447,6 +447,8 @@ def _norm_msg(m):
     msg = {"name": str(m.get("name", "？")), "text": m.get("text", ""), "mine": bool(m.get("mine"))}
     if m.get("img_path"):
         msg["img_path"] = str(m["img_path"])
+    if m.get("file_path"):
+        msg["file_path"] = str(m["file_path"])
     if m.get("ts"):
         msg["ts"] = m["ts"]
     return msg
@@ -1824,13 +1826,15 @@ class ChatApp:
 
     # --------------------------- 消息追加 / 持久化 ---------------------------
 
-    def _append_message(self, key, name, text, mine, img_path=None):
+    def _append_message(self, key, name, text, mine, img_path=None, file_path=None):
         s = self._sessions.get(key)
         if s is None:
             return
         msg = {"name": name, "text": text, "mine": mine, "ts": time.time()}
         if img_path:
             msg["img_path"] = img_path
+        if file_path:
+            msg["file_path"] = file_path
         s["messages"].append(msg)
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
@@ -1842,7 +1846,7 @@ class ChatApp:
             if img_path and os.path.isfile(img_path):
                 self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
             else:
-                self._add_bubble(name, text, mine, msg.get("ts"), show_head)
+                self._add_bubble(name, text, mine, msg.get("ts"), show_head, file_path=file_path)
         else:
             s["unread"] = s.get("unread", 0) + 1
             self._apply_session_list()
@@ -2208,7 +2212,7 @@ class ChatApp:
             return True
         return (cur.get("ts") or 0) - (prev.get("ts") or 0) >= ChatApp.GROUP_GAP
 
-    def _add_bubble(self, name, text, mine, ts=None, show_head=True):
+    def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None):
         tstr = _fmt_time(ts) if ts else ""
         bubble = ctk.CTkFrame(self.feed, corner_radius=14,
                               fg_color=(C("mine_bubble") if mine else C("other_bubble")))
@@ -2225,7 +2229,7 @@ class ChatApp:
                             text_color=(C("mine_text") if mine else C("other_text")),
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
-        body.bind("<Button-3>", lambda e, t=text: self._copy_text_menu(e, t))
+        body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p))
         self._scroll_bottom()
         self._trim_feed()
 
@@ -2265,7 +2269,7 @@ class ChatApp:
             _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
             _img.pack(padx=6, pady=4)
             _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
-            _img.bind("<Button-3>", lambda e, p=path: self._copy_text_menu(e, p))
+            _img.bind("<Button-3>", lambda e, p=path: self._message_menu(e, p, p))
             self._scroll_bottom()
             self._trim_feed()
         except Exception:
@@ -2289,6 +2293,38 @@ class ChatApp:
             self._set_status("已复制到剪贴板", "ok")
         except Exception:
             pass
+
+    def _open_file_location(self, path):
+        """在系统文件管理器中打开文件所在位置并选中文件。"""
+        try:
+            path = os.path.abspath(path or "")
+            if not path:
+                return
+            if os.name == "nt":
+                import subprocess
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(path)])
+            else:
+                d = os.path.dirname(path)
+                if os.path.isdir(d):
+                    import subprocess
+                    subprocess.Popen(["xdg-open", d])
+        except Exception:
+            pass
+
+    def _message_menu(self, event, text, file_path=None):
+        """消息右键菜单：复制文本 + （文件消息）打开位置 / 复制路径。"""
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
+            if file_path:
+                menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(file_path))
+                menu.add_command(label="复制路径", command=lambda: self._copy_to_clipboard(file_path))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
 
     def _show_system(self, text, target_key=None):
         target_key = target_key or self._current
@@ -2344,7 +2380,8 @@ class ChatApp:
             if m.get("img_path") and os.path.isfile(m["img_path"]):
                 self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
             else:
-                self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head)
+                self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
+                                 file_path=m.get("file_path"))
         self._scroll_bottom()
 
     def _show_file_event(self, room, event, info):
@@ -2365,7 +2402,8 @@ class ChatApp:
             if is_image(mime) and info.get("path"):
                 self._append_message(key, my, f"🖼 图片：{name}", True, img_path=info["path"])
             else:
-                self._append_message(key, my, f"📎 已发送文件：{name}（{fmt_size(size)}）", True)
+                self._append_message(key, my, f"📎 已发送文件：{name}（{fmt_size(size)}）", True,
+                                     file_path=info.get("path", ""))
         elif event == "offer":
             self._add_file_offer_card(key, room, info)
         elif event == "rejected":
@@ -2376,7 +2414,8 @@ class ChatApp:
             if is_image(mime):
                 self._append_message(key, sname, f"🖼 图片：{name}", False, img_path=path)
             else:
-                self._append_message(key, sname, f"📎 已收到文件：{name}（{fmt_size(size)}）", False)
+                self._append_message(key, sname, f"📎 已收到文件：{name}（{fmt_size(size)}）", False,
+                                     file_path=path)
             self._show_system(f"✅ 已保存到：{path}", key)
         elif event == "error":
             self._show_system(f"⚠️ {name}：{info.get('msg', '失败')}", key)

@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1862,6 +1862,8 @@ class ChatApp:
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
+            help_menu.add_command(label="导出当前会话记录", command=self._export_current_history)
+            help_menu.add_separator()
             help_menu.add_command(label="清空当前会话记录", command=self._clear_current_history)
             help_menu.add_command(label="清空所有会话记录", command=self._clear_all_history)
             help_menu.add_command(label="打开收件文件夹", command=self._open_downloads)
@@ -2599,6 +2601,44 @@ class ChatApp:
                 self._update_chat_title()
                 self._render_feed()
         self._apply_session_list()
+
+    def _export_current_history(self):
+        """把当前会话的聊天记录导出为 txt 文件。"""
+        s = self._sessions.get(self._current)
+        if s is None:
+            self._set_status("当前没有选中的会话", "err")
+            return
+        try:
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(
+                title="导出聊天记录", defaultextension=".txt",
+                initialfile=f"聊天记录_{s.get('name', '会话')}.txt",
+                filetypes=[("文本文件", "*.txt")])
+        except Exception:
+            path = ""
+        if not path:
+            return
+        try:
+            head_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            lines = [f"===== {s.get('name', '会话')} 聊天记录 =====",
+                     f"导出时间：{head_time}", ""]
+            for m in s["messages"]:
+                ts = _fmt_time(m.get("ts"))
+                name = str(m.get("name", "?"))
+                text = str(m.get("text", ""))
+                if m.get("system"):
+                    lines.append(f"[系统] {text}")
+                elif m.get("recalled"):
+                    lines.append(f"[{ts}] {name}：（已撤回）")
+                elif m.get("img_path"):
+                    lines.append(f"[{ts}] {name}：[图片] {text}")
+                else:
+                    lines.append(f"[{ts}] {name}：{text}")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines))
+            self._set_status(f"已导出到 {path}", "ok")
+        except Exception:
+            self._set_status("导出失败", "err")
 
     def _clear_current_history(self):
         s = self._sessions.get(self._current)

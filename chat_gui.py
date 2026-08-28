@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1175,16 +1175,17 @@ class MqttBackend:
         """
         try:
             import subprocess
+            _flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
             for port in (LAN_PORT, LAN_MSG_PORT):
                 rule = f"P2PChat Direct {port}"
                 subprocess.run(
                     ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule}"],
-                    capture_output=True, timeout=8)
+                    capture_output=True, timeout=6, creationflags=_flags)
                 subprocess.run(
                     ["netsh", "advfirewall", "firewall", "add", "rule",
                      f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
                      f"localport={port}", "profile=any"],
-                    capture_output=True, timeout=8)
+                    capture_output=True, timeout=6, creationflags=_flags)
         except Exception:
             pass
 
@@ -2704,6 +2705,7 @@ class ChatApp:
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
+        self.enter_sends = bool(_load_settings().get("enter_sends", True))
         self._history_expanded = False  # 是否已展开“更早消息”
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
         self.notify_popup = bool(_load_settings().get("notify_popup", True))
@@ -2742,6 +2744,7 @@ class ChatApp:
 
         self._apply_session_list()
         self.root.after(1, self._render_feed)  # 延迟渲染 feed，窗口先显示，启动更快
+        self._start_auto_backup()
         self._set_status("未连接", "mute")
         self._show_system("🌸 欢迎使用 P2P 聊天！顶部输入房间名点「＋ 加入」即自动上线常驻；或点「💌 私聊」输入对方 ID 直接开聊。文字 / 图片 / 语音 / 文件都能发，同网段自动走局域网直连加速哦～")
         # 房间即群组：启动时存在历史房间则自动连接常驻上线
@@ -3045,6 +3048,10 @@ class ChatApp:
             ctk.CTkCheckBox(win, text="启动时自动连接", variable=auto_var,
                             command=lambda: self._apply_setting("auto_connect", auto_var, "auto_connect"),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+            enter_var = tk.BooleanVar(value=self.enter_sends)
+            ctk.CTkCheckBox(win, text="回车键发送（关闭后为 QQ 风格 Ctrl+回车发送、回车换行）", variable=enter_var,
+                            command=lambda: self._apply_setting("enter_sends", enter_var, "enter_sends"),
+                            font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
             dnd_var = tk.BooleanVar(value=self._dnd)
             ctk.CTkCheckBox(win, text="免打扰（静音通知+提示音）", variable=dnd_var,
                             command=lambda: self._apply_setting_dnd(dnd_var),
@@ -3140,6 +3147,24 @@ class ChatApp:
 
     def _rebuild_ui(self):
         # 主题切换：销毁并重建全部控件（会话/历史状态保存在 self 里，不丢）
+        # 先关闭所有浮窗（表情面板 / @面板 / 设置 / 个人资料等独立 Toplevel），避免主题重建后残留“闪现空窗”。
+        try:
+            for w in list(self.root.winfo_children()):
+                try:
+                    if w.winfo_class() == "Toplevel" and w is not self.root:
+                        w.destroy()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        self._close_emoji_panel()
+        self._close_mention_panel()
+        for attr in ("_emoji_win", "_mention_win", "_emoji_cv", "_emoji_items",
+                     "_emoji_tab_btns", "_emoji_root_bind"):
+            try:
+                setattr(self, attr, None)
+            except Exception:
+                pass
         nick = ""
         try:
             nick = self.nick_var.get().strip()
@@ -3938,7 +3963,7 @@ class ChatApp:
         s["messages"].append(msg)
         if len(s["messages"]) > self.FEED_MAX:
             s["messages"] = s["messages"][-self.FEED_MAX:]
-        self._save_session(s)
+        self._schedule_session_save(s)
         self._maybe_notify(s, name, text, mine, system)
         if not mine and not system and self._mentions_me(text):
             s["@me"] = True
@@ -3974,6 +3999,29 @@ class ChatApp:
             self._update_window_title()
             if not mine:
                 self._flash_window()
+
+    def _schedule_session_save(self, s):
+        """消息追加节流保存：100ms 内多次追加只合并写一次盘（
+        避免每条消息都全量序列化+写文件，批量消息/历史加载时性能大幅提升）。"""
+        try:
+            key = s.get("key") or id(s)
+            if getattr(self, "_session_save_after", None) is not None:
+                try:
+                    self.root.after_cancel(self._session_save_after)
+                except Exception:
+                    pass
+            self._session_save_after = self.root.after(100, lambda k=key: self._flush_session_save(k))
+        except Exception:
+            self._save_session(s)
+
+    def _flush_session_save(self, key):
+        try:
+            self._session_save_after = None
+            s = self._sessions.get(key)
+            if s is not None:
+                self._save_session(s)
+        except Exception:
+            pass
 
     def _save_session(self, s):
         if s["kind"] == "group":
@@ -4074,6 +4122,46 @@ class ChatApp:
         except Exception:
             self._set_status("备份失败", "err")
 
+    def _auto_backup_loop(self):
+        """自动定期备份：每小时把会话记录/设置打包到 history/auto_backup/，保留最近 24 份。"""
+        while self._auto_backup_stop.is_set() is False:
+            try:
+                import zipfile
+                import glob
+                bk_dir = os.path.join(DATA_DIR, "..", "history", "auto_backup")
+                try:
+                    os.makedirs(bk_dir, exist_ok=True)
+                except Exception:
+                    pass
+                ts = time.strftime("%Y%m%d_%H%M")
+                path = os.path.join(bk_dir, f"p2p_auto_{ts}.zip")
+                if not os.path.isfile(path):
+                    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for fn in sorted(os.listdir(DATA_DIR)):
+                            fp = os.path.join(DATA_DIR, fn)
+                            if os.path.isfile(fp) and not fn.startswith(("paste_", "voice_")):
+                                try:
+                                    zf.write(fp, "p2pdata/" + fn)
+                                except Exception:
+                                    pass
+                    # 保留最近 24 份
+                    olds = sorted(glob.glob(os.path.join(bk_dir, "p2p_auto_*.zip")))
+                    for f_ in olds[:-24]:
+                        try:
+                            os.remove(f_)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            self._auto_backup_stop.wait(3600)
+
+    def _start_auto_backup(self):
+        try:
+            self._auto_backup_stop = threading.Event()
+            threading.Thread(target=self._auto_backup_loop, daemon=True).start()
+        except Exception:
+            pass
+
     def _restore_data(self):
         """从 zip 备份恢复数据（覆盖当前数据）。"""
         try:
@@ -4169,33 +4257,48 @@ class ChatApp:
         self._set_status("不是有效的 P2P 名片二维码", "err")
 
     def _open_firewall_ports(self):
-        """手动开放直连端口（需管理员权限）：IPv6 公网直连需 Windows 防火墙放行。"""
-        try:
-            import subprocess
+        """手动开放直连端口（需管理员权限）：后台线程执行，不阻塞界面。"""
+        self._set_status("正在请求开放直连端口…", "mute")
+        def _work():
             ok = True
             msgs = []
-            for port in (LAN_PORT, LAN_MSG_PORT):
-                rule = f"P2PChat Direct {port}"
-                r = subprocess.run(
-                    ["netsh", "advfirewall", "firewall", "add", "rule",
-                     f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
-                     f"localport={port}", "profile=any"],
-                    capture_output=True, text=True, timeout=15)
-                msgs.append((port, r.returncode, (r.stdout or r.stderr or "").strip()))
-                if r.returncode != 0:
-                    ok = False
-            if ok:
-                self._set_status("已开放直连端口 47654/47656（IPv6 公网直连可用）", "ok")
-            else:
-                detail = "；".join(f"{p}: {c} {m[:60]}" for p, c, m in msgs if c != 0)
-                self._set_status("开放失败，请右键「以管理员身份运行」后重试", "err")
-                try:
-                    import tkinter.messagebox as mb
-                    mb.showwarning("开放端口", "需要管理员权限才能修改防火墙。\n请右键程序图标选择「以管理员身份运行」后，再点一次本菜单项。")
-                except Exception:
-                    pass
+            try:
+                import subprocess
+                for port in (LAN_PORT, LAN_MSG_PORT):
+                    rule = f"P2PChat Direct {port}"
+                    try:
+                        r = subprocess.run(
+                            ["netsh", "advfirewall", "firewall", "add", "rule",
+                             f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
+                             f"localport={port}", "profile=any"],
+                            capture_output=True, text=True, timeout=10,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+                        msgs.append((port, r.returncode, (r.stdout or r.stderr or "").strip()))
+                        if r.returncode != 0:
+                            ok = False
+                    except Exception as e:
+                        ok = False
+                        msgs.append((port, -1, str(e)[:60]))
+            except Exception:
+                ok = False
+            def _done():
+                if ok:
+                    self._set_status("已开放直连端口 47654/47656（IPv6 公网直连可用）", "ok")
+                else:
+                    self._set_status("开放失败，请以管理员身份运行后重试", "err")
+                    try:
+                        import tkinter.messagebox as mb
+                        mb.showwarning("开放端口", "需要管理员权限才能修改防火墙。\n请右键程序图标选择「以管理员身份运行」后，再点一次本菜单项。")
+                    except Exception:
+                        pass
+            try:
+                self.root.after(0, _done)
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_work, daemon=True).start()
         except Exception:
-            self._set_status("开放失败，请以管理员身份运行后重试", "err")
+            self._set_status("开放失败，请重试", "err")
 
     def _measure_network(self):
         """测量到 MQTT 服务器的连接延迟（TCP 建连耗时）。"""
@@ -4600,10 +4703,20 @@ class ChatApp:
             self._mention_win = None
 
     def _on_enter(self, event):
-        if event.state & 0x0001:     # Shift+回车 = 换行
-            return None
-        self._send_text()
-        return "break"
+        """车回键发送模式（可设置）：
+        默认 Enter=发送、Shift+Enter=换行；
+        关闭“回车发送”后：QQ 风格 Ctrl+Enter=发送、Enter=换行。"""
+        ctrl = bool(event.state & 0x0004)
+        if getattr(self, "enter_sends", True):
+            if event.state & 0x0001:     # Shift+回车 = 换行
+                return None
+            self._send_text()
+            return "break"
+        else:
+            if ctrl:                    # Ctrl+Enter = 发送
+                self._send_text()
+                return "break"
+            return None                 # Enter = 换行
 
     def _pick_file(self):
         paths = filedialog.askopenfilenames(title="选择要发送的文件或图片（可多选）")
@@ -4732,6 +4845,8 @@ class ChatApp:
             self._set_status("录音太短，已取消", "mute")
 
     def _toggle_emoji_panel(self):
+        """打开/关闭表情面板。所有 460 个表情用单个 Canvas 绘制（create_text），
+        控件数从 460 降到 1，首次打开 <0.2s；切页只重绘文本，瞬间完成。"""
         win = getattr(self, "_emoji_win", None)
         if win is not None:
             try:
@@ -4741,40 +4856,69 @@ class ChatApp:
             except Exception:
                 win = None
         if win is None:
-            # 首次创建面板（之后只隐藏/显示复用，开关瞬时完成）
             try:
+                import tkinter as _tk
                 win = ctk.CTkToplevel(self.root)
                 self._emoji_win = win
                 win.overrideredirect(True)
                 win.configure(fg_color=C("panel"))
                 win.attributes("-topmost", True)
                 self._emoji_group_idx = 0
-                # 分类页签栏（QQ 风格）
+                self._emoji_locked = False
+                # 顶栏：标题 + 锁定按钮
+                headbar = ctk.CTkFrame(win, fg_color="transparent")
+                headbar.pack(fill="x", padx=6, pady=(4, 0))
+                ctk.CTkLabel(headbar, text="表情（点击外部关闭）", text_color=C("text_mute"),
+                             font=(FONT, 10)).pack(side="left")
+                self._emoji_lock_btn = ctk.CTkButton(
+                    headbar, text="🔓", width=30, height=22, corner_radius=6,
+                    fg_color=C("input_bg"), text_color=C("text_2"),
+                    hover_color=C("input_hover"), font=(FONT, 10),
+                    command=self._toggle_emoji_lock)
+                self._emoji_lock_btn.pack(side="right")
+                # 分类页签
                 tabbar = ctk.CTkFrame(win, fg_color="transparent")
-                tabbar.pack(fill="x", padx=4, pady=(4, 0))
+                tabbar.pack(fill="x", padx=4, pady=(2, 0))
                 self._emoji_tab_btns = []
                 for gi, g in enumerate(EMOJI_GROUPS):
-                    tb = ctk.CTkButton(tabbar, text=g["label"], width=0, height=24, corner_radius=8,
+                    tb = ctk.CTkButton(tabbar, text=g["label"], width=0, height=22, corner_radius=8,
                                        fg_color=C("input_bg"), text_color=C("text"),
-                                       hover_color=C("input_hover"), font=(FONT, 10),
+                                       hover_color=C("input_hover"), font=(FONT, 9),
                                        command=lambda idx=gi: self._switch_emoji_group(idx))
                     tb.pack(side="left", padx=1, fill="x", expand=True)
                     self._emoji_tab_btns.append(tb)
+                # 单个 Canvas：画当前分组全部表情
                 cols = 10
-                scroll = ctk.CTkScrollableFrame(win, width=cols * 38 + 10, height=280,
-                                                fg_color="transparent")
-                scroll.pack(padx=4, pady=4)
-                grid = ctk.CTkFrame(scroll, fg_color="transparent")
-                grid.pack()
-                self._emoji_grid = grid
-                self._build_emoji_group(0)
+                cell = 36
+                self._emoji_cell = cell
+                self._emoji_cols = cols
+                cv = _tk.Canvas(win, width=cols * cell + 4, height=8 * cell + 8,
+                                bg=C("panel"), highlightthickness=0)
+                cv.pack(padx=4, pady=4)
+                self._emoji_cv = cv
+                cv.bind("<Button-1>", self._on_emoji_canvas_click)
+                cv.bind("<Motion>", self._on_emoji_canvas_hover)
+                cv.bind("<Leave>", lambda e: cv.delete("emojihl"))
+                self._emoji_items = []  # (em, x, y)
+                self._draw_emoji_group(0)
                 win.bind("<Escape>", lambda e: self._close_emoji_panel())
-                win.withdraw()  # 先隐藏，避免闪现
+                win.bind("<FocusOut>", lambda e: self._on_emoji_focus_out())
+                win.withdraw()
             except Exception:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
                 self._emoji_win = None
                 return
-        # 显示（复用，瞬时）
         try:
+            # 先移除上次展示的绑定（避免重复绑定增长提交时间）
+            if getattr(self, "_emoji_root_bind", None) is not None:
+                try:
+                    self.root.unbind("<Button-1>", self._emoji_root_bind)
+                except Exception:
+                    pass
+                self._emoji_root_bind = None
             win.deiconify()
             win.attributes("-topmost", True)
             win.update_idletasks()
@@ -4783,44 +4927,123 @@ class ChatApp:
             x = self.root.winfo_rootx() + self.root.winfo_width() - w - 24
             y = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
             win.geometry(f"+{max(0, x)}+{max(0, y)}")
+            self._emoji_hidden = False
+            # 显示期间监听主窗口点击：点击主界面（非面板）即关闭（仅当次显示，用完移除）
+            self._emoji_root_bind = self.root.bind("<Button-1>", self._on_click_outside, add="+")
+            win.focus_force()
+        except Exception:
+            pass
+
+    def _on_emoji_focus_out(self):
+        """面板失去焦点：未锁定时关闭（点击别处 / 按 Alt+Tab 等）。"""
+        if getattr(self, "_emoji_locked", False):
+            return
+        try:
+            # 短暂延迟，避免焦点在面板内控件间转移时误关
+            self.root.after(120, self._close_emoji_panel)
+        except Exception:
+            pass
+
+    def _draw_emoji_group(self, gi):
+        """在 Canvas 上绘制当前分组的表情（纯文本绘制，毫秒级）。"""
+        try:
+            cv = getattr(self, "_emoji_cv", None)
+            if cv is None:
+                return
+            cv.delete("all")
+            cv.delete("emojihl")
+            g = EMOJI_GROUPS[gi] if 0 <= gi < len(EMOJI_GROUPS) else EMOJI_GROUPS[0]
+            cell = getattr(self, "_emoji_cell", 36)
+            cols = getattr(self, "_emoji_cols", 10)
+            self._emoji_items = []
+            for i, em in enumerate(g["items"]):
+                r, c = divmod(i, cols)
+                x = 4 + c * cell + cell // 2
+                y = 4 + r * cell + cell // 2
+                cv.create_text(x, y, text=em, font=("Segoe UI Emoji", 15), fill=C("text"))
+                self._emoji_items.append((em, x, y))
+        except Exception:
+            pass
+
+    def _on_emoji_canvas_click(self, event):
+        """Canvas 点击命中检测：点到哪个表情就插入哪个。"""
+        try:
+            for em, x, y in getattr(self, "_emoji_items", []) or []:
+                if abs(event.x - x) <= 16 and abs(event.y - y) <= 16:
+                    self._insert_emoji(em)
+                    return
+        except Exception:
+            pass
+
+    def _on_emoji_canvas_hover(self, event):
+        """悬停高亮当前表情（单个矩形，无控件创建）。"""
+        try:
+            cv = getattr(self, "_emoji_cv", None)
+            if cv is None:
+                return
+            for em, x, y in getattr(self, "_emoji_items", []) or []:
+                if abs(event.x - x) <= 16 and abs(event.y - y) <= 16:
+                    cv.delete("emojihl")
+                    cv.create_rectangle(x - 17, y - 17, x + 17, y + 17,
+                                        fill=C("hover"), outline="", tags="emojihl")
+                    cv.tag_lower("emojihl")
+                    return
+            cv.delete("emojihl")
+        except Exception:
+            pass
+
+    def _toggle_emoji_lock(self):
+        """锁定/解锁表情面板：锁定时连续点多个表情不自动关闭。"""
+        self._emoji_locked = not getattr(self, "_emoji_locked", False)
+        try:
+            btn = getattr(self, "_emoji_lock_btn", None)
+            if btn is not None:
+                btn.configure(text=("🔒" if self._emoji_locked else "🔓"),
+                              fg_color=(C("accent") if self._emoji_locked else C("input_bg")),
+                              text_color=("#ffffff" if self._emoji_locked else C("text_2")))
+        except Exception:
+            pass
+        self._set_status("表情面板已锁定，可连续插入多个表情" if self._emoji_locked
+                         else "表情面板已解锁，插入后自动关闭", "ok")
+
+    def _on_click_outside(self, event):
+        """点击主窗口区域（非面板）：未锁定时关闭面板。这个绑定在展示时加在主窗口上，关闭时移除。"""
+        if getattr(self, "_emoji_locked", False):
+            return
+        win = getattr(self, "_emoji_win", None)
+        if win is None:
+            return
+        try:
+            if not win.winfo_exists():
+                return
+            # 面板已隐藏则不处理
+            if getattr(self, "_emoji_hidden", False):
+                return
+            self._close_emoji_panel()
         except Exception:
             pass
 
     def _close_emoji_panel(self):
+        self._emoji_hidden = True
         win = getattr(self, "_emoji_win", None)
         if win is not None:
             try:
                 if win.winfo_exists():
-                    win.withdraw()  # 隐藏复用，不销毁
+                    win.withdraw()
             except Exception:
                 self._emoji_win = None
-
-    def _build_emoji_group(self, gi):
-        """重建当前分类的表情网格（切换页签时用）。"""
         try:
-            grid = getattr(self, "_emoji_grid", None)
-            if grid is None:
-                return
-            for w in grid.winfo_children():
-                w.destroy()
-            g = EMOJI_GROUPS[gi]
-            cols = 10
-            for i, em in enumerate(g["items"]):
-                lbl = ctk.CTkLabel(grid, text=em, width=34, height=34, corner_radius=8,
-                                   fg_color="transparent", text_color=C("text"),
-                                   font=("Segoe UI Emoji", 15), cursor="hand2")
-                lbl.grid(row=i // cols, column=i % cols, padx=1, pady=1)
-                lbl.bind("<Button-1>", lambda e, em=em: self._insert_emoji(em))
-                lbl.bind("<Enter>", lambda e, l=lbl: l.configure(fg_color=C("hover")))
-                lbl.bind("<Leave>", lambda e, l=lbl: l.configure(fg_color="transparent"))
+            if getattr(self, "_emoji_root_bind", None) is not None:
+                self.root.unbind("<Button-1>", self._emoji_root_bind)
+                self._emoji_root_bind = None
         except Exception:
             pass
 
     def _switch_emoji_group(self, gi):
-        """切换表情分类页签。"""
+        """切换表情分类页签：仅重绘 Canvas 文本，毫秒级。"""
         try:
             self._emoji_group_idx = gi
-            self._build_emoji_group(gi)
+            self._draw_emoji_group(gi)
             for i, tb in enumerate(getattr(self, "_emoji_tab_btns", []) or []):
                 try:
                     tb.configure(fg_color=(C("accent") if i == gi else C("input_bg")),
@@ -4840,7 +5063,9 @@ class ChatApp:
             self.input_box.focus_set()
         except Exception:
             pass
-        self._close_emoji_panel()
+        # 锁定时保持面板开着，方便一次点多个表情；否则插入后自动关闭
+        if not getattr(self, "_emoji_locked", False):
+            self._close_emoji_panel()
 
     def _on_drop(self, event):
         try:
@@ -6297,6 +6522,11 @@ class ChatApp:
             self._append_message(key, "", f"⚠️ {name}：{info.get('msg', '失败')}", False, system=True)
 
     def _on_close(self):
+        try:
+            if getattr(self, "_auto_backup_stop", None) is not None:
+                self._auto_backup_stop.set()
+        except Exception:
+            pass
         try:
             if getattr(self, "_playing_voice", None):
                 self._stop_voice_play(self._playing_voice)

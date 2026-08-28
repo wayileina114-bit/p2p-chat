@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2588,6 +2588,42 @@ def _notify_crash(path):
         pass
 
 
+def _patch_focus_guards():
+    """从源头消除「对已销毁控件 focus_set」的迟到回调错误。
+
+    customtkinter 在 Windows 标题栏换色 / 最小化恢复时，会先保存当前焦点控件，再
+    after(1, widget.focus) 延迟还原焦点（见 ctk_tk.py 内部逻辑）。若这 1ms 期间界面
+    已被重建（会话列表刷新、对话框关闭等），旧控件已销毁，focus_set 就会抛
+    'bad window path name'。这里给 tkinter 的 focus_set / focus_force 加一层
+    winfo_exists 检查，控件不存在则静默跳过，彻底消除这类无害错误，不再落日志。
+    """
+    try:
+        _orig_focus_set = tk.Misc.focus_set
+        _orig_focus_force = tk.Misc.focus_force
+
+        def _safe_focus_set(self):
+            try:
+                if self.winfo_exists():
+                    _orig_focus_set(self)
+            except Exception:
+                pass
+
+        def _safe_focus_force(self):
+            try:
+                if self.winfo_exists():
+                    _orig_focus_force(self)
+            except Exception:
+                pass
+
+        tk.Misc.focus_set = _safe_focus_set
+        tk.Misc.focus_force = _safe_focus_force
+        # 注意：tkinter 里 focus 是 focus_set 的别名（focus = focus_set），而
+        # customtkinter 用的是 after(1, widget.focus)，需同步替换，否则仍走旧实现。
+        tk.Misc.focus = _safe_focus_set
+    except Exception:
+        pass
+
+
 def _install_excepthook():
     """把未捕获异常写到日志并弹窗，避免 --windowed 打包后静默闪退、无从排查。"""
 
@@ -2637,6 +2673,7 @@ def _report_callback_exception(etype, value, tb):
 
 def main():
     global _DND_READY
+    _patch_focus_guards()
     _install_excepthook()
     if not _ensure_deps():
         return

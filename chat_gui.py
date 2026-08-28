@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.4.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.4.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1827,6 +1827,7 @@ class ChatApp:
         self._members_visible = False  # 成员列表面板是否展开
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._dnd = False              # 免打扰（静音通知+提示音）
+        self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
@@ -2796,9 +2797,11 @@ class ChatApp:
                                 text_color=(C("accent") if selected else C("text_mute")),
                                 font=(FONT, 13, "bold"), cursor="hand2")
         hash_lbl.pack(side="left", padx=(10, 0), pady=(6, 0))
+        muted = self._is_muted(key)
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
-        ctk.CTkLabel(mid, text=room + (f"  {n}" if n else ""), anchor="w",
+        room_label = ("🔕 " + room) if muted else room
+        ctk.CTkLabel(mid, text=room_label + (f"  {n}" if n else ""), anchor="w",
                      text_color=(C("selected_text") if selected else C("text")),
                      font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2").pack(anchor="w")
         if preview:
@@ -2810,6 +2813,7 @@ class ChatApp:
         cross.pack(side="right", padx=(0, 6))
         for w in [row, hash_lbl] + list(mid.winfo_children()):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
+            w.bind("<Button-3>", lambda e, k=key: self._group_context_menu(e, k))
         cross.bind("<Button-1>", lambda e, r=room: self._remove_room(r))
         self._bind_row_hover(row, selected)
 
@@ -2827,7 +2831,7 @@ class ChatApp:
         dot.pack(side="left", padx=(10, 0), pady=(6, 0))
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
-        ctk.CTkLabel(mid, text=s["name"], anchor="w",
+        ctk.CTkLabel(mid, text=(("🔕 " + s["name"]) if self._is_muted(key) else s["name"]), anchor="w",
                      text_color=(C("selected_text") if selected else C("text")),
                      font=(FONT, 12, "bold" if (selected or unread) else "normal"),
                      cursor="hand2").pack(anchor="w")
@@ -2912,6 +2916,8 @@ class ChatApp:
         if mine or system:
             return
         if self._dnd:
+            return
+        if s.get("key") in self._muted:
             return
         if not self.notify_popup:
             return
@@ -3191,12 +3197,28 @@ class ChatApp:
                 self._render_feed()
         self._apply_session_list()
 
+    def _group_context_menu(self, event, key):
+        try:
+            menu = tk.Menu(self.root, tearoff=0)
+            muted = self._is_muted(key)
+            menu.add_command(label=("取消静音" if muted else "静音会话"),
+                             command=lambda: self._toggle_mute(key))
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
     def _dm_context_menu(self, event, s):
         try:
             menu = tk.Menu(self.root, tearoff=0)
             fav = self._is_contact(s["cid"])
             menu.add_command(label=("取消收藏" if fav else "★ 收藏联系人"),
                              command=lambda: self._toggle_contact(s["cid"], s["name"]))
+            muted = self._is_muted(s["key"])
+            menu.add_command(label=("取消静音" if muted else "静音会话"),
+                             command=lambda: self._toggle_mute(s["key"]))
             menu.add_command(label="删除会话", command=lambda: self._delete_dm_session(s["key"]))
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -3921,6 +3943,19 @@ class ChatApp:
             self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
 
     # --------------------------- 界面更新 ---------------------------
+
+    def _is_muted(self, key):
+        return key in self._muted
+
+    def _toggle_mute(self, key):
+        if key in self._muted:
+            self._muted.discard(key)
+            self._set_status("已取消静音", "ok")
+        else:
+            self._muted.add(key)
+            self._set_status("已静音该会话", "ok")
+        _update_settings("muted_sessions", sorted(self._muted))
+        self._apply_session_list()
 
     def _restore_status(self):
         """把状态栏恢复为连接状态（悬停显示时间后调用）。"""

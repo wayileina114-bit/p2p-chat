@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.4.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.4.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -4437,6 +4437,7 @@ class ChatApp:
         self._reaction_rows = {}
         self._body_labels = {}
         self._footer_labels = {}
+        self._feed_batch_gen = (getattr(self, "_feed_batch_gen", 0) or 0) + 1
         s = self._sessions.get(self._current)
         if s is None:
             self._update_chat_title()
@@ -4460,13 +4461,30 @@ class ChatApp:
             lbl.pack(pady=4)
             lbl.bind("<Button-1>", lambda e: self._expand_history())
             msgs = msgs[-self.RENDER_MAX:]
-        last_day = None
-        last_seen = s.get("last_seen_ts")
-        shown_new = False
+        self._feed_render = {
+            "msgs": msgs, "idx": 0, "last_day": None,
+            "last_seen": s.get("last_seen_ts"), "shown_new": False,
+            "pinned": [m for m in msgs if m.get("pinned") and not m.get("recalled")],
+        }
         self._suppress_auto_scroll = True  # 全量渲染：逐条 auto-scroll 交给末尾一次 _scroll_bottom
-        for pm in [m for m in msgs if m.get("pinned") and not m.get("recalled")]:
+        for pm in self._feed_render["pinned"]:
             self._render_pinned_card(pm)
-        for idx, m in enumerate(msgs):
+        self._render_feed_batch(self._feed_batch_gen)
+
+    def _render_feed_batch(self, gen):
+        """分批渲染消息（每批约 25 条），让大会话切换不卡界面。"""
+        if gen != getattr(self, "_feed_batch_gen", 0):
+            return
+        st = self._feed_render
+        if st is None:
+            return
+        msgs = st["msgs"]
+        end = min(st["idx"] + 25, len(msgs))
+        last_day = st["last_day"]
+        last_seen = st["last_seen"]
+        shown_new = st["shown_new"]
+        for idx in range(st["idx"], end):
+            m = msgs[idx]
             if m.get("pinned"):
                 continue
             ts = m.get("ts")
@@ -4492,12 +4510,31 @@ class ChatApp:
                                  recalled=m.get("recalled"), recalled_by=m.get("recalled_by"),
                                  edited=m.get("edited"), reply=m.get("reply"),
                                  reactions=m.get("reactions"))
+        st["idx"] = end
+        st["last_day"] = last_day
+        st["shown_new"] = shown_new
+        if end < len(msgs):
+            self.root.after(12, lambda g=gen: self._render_feed_batch(g))
+        else:
+            self._finish_feed_render()
+
+    def _finish_feed_render(self):
         self._suppress_auto_scroll = False
+        s = self._sessions.get(self._current)
         if self._search_query:
             self._scroll_top()
         else:
             self._scroll_bottom()
-        self._ack_reads(s)
+        if s:
+            self._ack_reads(s)
+
+    def _flush_feed_render(self):
+        """同步把剩余批次渲染完（测试 / 收尾用）。"""
+        while getattr(self, "_feed_render", None) is not None:
+            st = self._feed_render
+            if st is None or st["idx"] >= len(st["msgs"]):
+                break
+            self._render_feed_batch(self._feed_batch_gen)
 
     def _show_image_preview(self, key, room, info):
         """图片 offer 到达：立即显示低画质缩略图预览，并自动接收原图（QQ 式内联）。"""

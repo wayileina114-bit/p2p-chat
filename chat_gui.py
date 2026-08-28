@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -100,6 +100,7 @@ DEFAULT_BROKER = "broker.emqx.io"
 DEFAULT_PORT = 1883
 CHUNK_SIZE = 512 * 1024          # 每个分片 512KB（二进制直传，更大分片减少往返次数，提速）
 LAN_PORT = 47654                  # 局域网直连监听端口（同网段文件加速，失败回退 MQTT）
+LAN_DISCOVER_PORT = 47655        # 局域网成员自动发现端口（UDP 广播）
 MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
@@ -845,7 +846,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, on_edit=None, on_reaction=None, passphrase=""):
+                 on_recall=None, on_read=None, on_typing=None, on_delivered=None, on_edit=None, on_reaction=None, on_lan_peers=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -863,6 +864,9 @@ class MqttBackend:
         self.on_delivered = on_delivered
         self.on_edit = on_edit
         self.on_reaction = on_reaction
+        self.on_lan_peers = on_lan_peers
+        self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms, last_seen}
+        self._lan_stop_evt = threading.Event()
         self._delivered_acked = set()  # 已自动回过“已送达”的消息 mid
 
         self.online = False
@@ -1302,6 +1306,9 @@ class MqttBackend:
         self._client = self._build()
         self._client.loop_start()
         threading.Thread(target=self._prune_loop, daemon=True).start()
+        # 后台局域网成员自动发现（同网段成员互通的基础）
+        self._lan_stop_evt = threading.Event()
+        threading.Thread(target=self._lan_discover_loop, daemon=True).start()
         try:
             self._client.connect_async(self.broker, self.port, keepalive=30)
         except Exception as e:
@@ -1310,6 +1317,10 @@ class MqttBackend:
 
     def stop(self):
         self.running = False
+        try:
+            self._lan_stop_evt.set()
+        except Exception:
+            pass
         for p in self._pending.values():
             p["evt"].set()
         self._pending.clear()
@@ -1680,6 +1691,85 @@ class MqttBackend:
         self._publish_ctrl(data.get("room"),
                            {"kind": "reject", "id": tid, "from": self.cid, "to": data["from"], "reason": "rejected"})
 
+    # --------------------------- 局域网成员自动发现 ---------------------------
+
+    def _lan_broadcast_payload(self):
+        try:
+            return json.dumps({"cid": self.cid, "name": self.nickname,
+                               "lan_ip": _get_lan_ip(), "rooms": list(self.rooms),
+                               "ts": time.time()}).encode("utf-8")
+        except Exception:
+            return b""
+
+    def _lan_discover_loop(self):
+        """后台线程：周期性 UDP 广播自己的存在，并监听同网段成员的广播。"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("0.0.0.0", LAN_DISCOVER_PORT))
+            except Exception:
+                sock.bind(("0.0.0.0", 0))
+            sock.settimeout(0.5)
+        except Exception:
+            return
+        last_bcast = 0.0
+        changed = False
+        while not self._lan_stop_evt.is_set():
+            try:
+                now = time.time()
+                if now - last_bcast >= 5:
+                    last_bcast = now
+                    try:
+                        sock.sendto(self._lan_broadcast_payload(), ("255.255.255.255", LAN_DISCOVER_PORT))
+                    except Exception:
+                        pass
+                try:
+                    data, addr = sock.recvfrom(65535)
+                    try:
+                        info = json.loads(data.decode("utf-8"))
+                        cid = str(info.get("cid", ""))
+                        if cid and cid != self.cid and addr[0]:
+                            lan_ip = str(info.get("lan_ip") or addr[0])
+                            p = self._lan_peers.get(cid)
+                            if p is None or p.get("lan_ip") != lan_ip or p.get("name") != info.get("name"):
+                                changed = True
+                            self._lan_peers[cid] = {
+                                "name": str(info.get("name", "匿名"))[:60],
+                                "lan_ip": lan_ip,
+                                "rooms": list(info.get("rooms") or []),
+                                "last_seen": now,
+                            }
+                    except Exception:
+                        pass
+                except socket.timeout:
+                    pass
+                # 清理超时成员
+                stale = [c for c, p in self._lan_peers.items() if now - p["last_seen"] > 20]
+                if stale:
+                    for c in stale:
+                        self._lan_peers.pop(c, None)
+                    changed = True
+                if changed:
+                    changed = False
+                    self._fire_lan_peers()
+            except Exception:
+                pass
+            time.sleep(0.2)
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+    def _fire_lan_peers(self):
+        if self.on_lan_peers:
+            try:
+                self.on_lan_peers({cid: {"name": p["name"], "lan_ip": p["lan_ip"], "rooms": p["rooms"]}
+                                   for cid, p in self._lan_peers.items()})
+            except Exception:
+                pass
+
     # --------------------------- 文件发送流程 ---------------------------
 
     def _lan_listener(self, tid):
@@ -1877,6 +1967,7 @@ class ChatApp:
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._dnd = False              # 免打扰（静音通知+提示音）
         self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
+        self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms}
         self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
@@ -2751,7 +2842,8 @@ class ChatApp:
                 flow = ctk.CTkFrame(self.members_frame, fg_color="transparent")
                 flow.pack(fill="x", padx=8, pady=(0, 8))
                 for cid, nm in others:
-                    ctk.CTkButton(flow, text=nm, height=26, corner_radius=13,
+                    label = ("🔗 " + nm) if cid in (self._lan_peers or {}) else nm
+                    ctk.CTkButton(flow, text=label, height=26, corner_radius=13,
                                   fg_color=C("input_bg"), text_color=C("text"),
                                   hover_color=C("input_hover"), font=(FONT, 11),
                                   command=lambda c=cid, nm=nm: self._start_dm(c, nm)).pack(side="left", padx=2, pady=2)
@@ -3417,6 +3509,7 @@ class ChatApp:
             on_delivered=self._cb_delivered,
             on_edit=self._cb_edit,
             on_reaction=self._cb_reaction,
+            on_lan_peers=self._cb_lan_peers,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -3756,6 +3849,9 @@ class ChatApp:
 
     def _cb_reaction(self, room, mid, emoji, cid, name):
         self.root.after(0, lambda: self._receive_reaction(room, mid, emoji, cid, name))
+
+    def _cb_lan_peers(self, peers):
+        self.root.after(0, lambda: self._update_lan_peers(peers or {}))
 
     def _receive_typing(self, room, name, cid):
         """收到“正在输入”状态：当前会话标题临时显示，2.5 秒后恢复。"""
@@ -4134,6 +4230,23 @@ class ChatApp:
             self._read_acked.add(mid)
             self.backend.send_read(target, mid, is_dm)
 
+    def _update_lan_peers(self, peers):
+        """后台自动发现同网段成员后更新界面。"""
+        self._lan_peers = peers
+        self._refresh_status_bar()
+        self._refresh_members()
+
+    def _refresh_status_bar(self):
+        if self.backend and self.backend.online:
+            total = len(self._peers)
+            lan = len(self._lan_peers or {})
+            if lan:
+                self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线 · 🔗 局域网 {lan} 人", "ok")
+            else:
+                self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
+        else:
+            self._set_status("未连接", "mute")
+
     def _refresh_peers(self, peers):
         self._peers = peers or {}
         for s in self._sessions.values():
@@ -4142,9 +4255,7 @@ class ChatApp:
         self._schedule_session_list()
         self._update_chat_title()
         self._refresh_members()
-        if self.backend and self.backend.online:
-            total = len(self._peers)
-            self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
+        self._refresh_status_bar()
 
     # --------------------------- 界面更新 ---------------------------
 
@@ -4176,10 +4287,7 @@ class ChatApp:
 
     def _restore_status(self):
         """把状态栏恢复为连接状态（悬停显示时间后调用）。"""
-        if self.backend and self.backend.online:
-            self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {len(self._peers)} 人在线", "ok")
-        else:
-            self._set_status("未连接", "mute")
+        self._refresh_status_bar()
 
     def _set_status(self, msg, color="mute"):
         # color 支持语义键（mute/ok/err/accent）或直接传十六进制色值

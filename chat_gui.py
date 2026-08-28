@@ -22,6 +22,7 @@ import json
 import math
 import mimetypes
 import os
+import re
 import struct
 import sys
 import threading
@@ -69,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.21"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.22"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1217,7 +1218,11 @@ class ChatApp:
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
 
         self.root.title("P2P 聊天")
-        self.root.geometry("1000x680")
+        saved_geo = str(_load_settings().get("window_geometry", "") or "").strip()
+        if saved_geo and re.fullmatch(r"\d{3,5}x\d{3,5}([+-]\d+[+-]\d+)?", saved_geo):
+            self.root.geometry(saved_geo)
+        else:
+            self.root.geometry("1000x680")
         self.root.minsize(820, 560)
         self.root.configure(fg_color=C("app_bg"))
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2466,6 +2471,10 @@ class ChatApp:
             self._append_message(key, "", f"⚠️ {name}：{info.get('msg', '失败')}", False, system=True)
 
     def _on_close(self):
+        try:
+            _update_settings("window_geometry", self.root.geometry())
+        except Exception:
+            pass
         if self.backend:
             try:
                 self.backend.stop()

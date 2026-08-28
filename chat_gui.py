@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.20"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.21"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2087,9 +2087,12 @@ class ChatApp:
             if self.backend.send_dm(s["cid"], text):
                 self._append_message(s["key"], my, text, True)
             else:
+                self.input_box.insert("1.0", text)
                 self._show_system("发送失败，请检查连接。")
         else:
-            self.backend.send_text(s["room"], text)
+            if not self.backend.send_text(s["room"], text):
+                self.input_box.insert("1.0", text)
+                self._show_system("发送失败，请检查连接。")
 
     def _on_enter(self, event):
         if event.state & 0x0001:     # Shift+回车 = 换行

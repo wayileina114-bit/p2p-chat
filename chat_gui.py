@@ -23,6 +23,7 @@ import math
 import mimetypes
 import os
 import re
+import socket
 import struct
 import sys
 import threading
@@ -91,13 +92,14 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.4.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.4.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
 DEFAULT_BROKER = "broker.emqx.io"
 DEFAULT_PORT = 1883
 CHUNK_SIZE = 512 * 1024          # 每个分片 512KB（二进制直传，更大分片减少往返次数，提速）
+LAN_PORT = 47654                  # 局域网直连监听端口（同网段文件加速，失败回退 MQTT）
 MAX_FILE = 200 * 1024 * 1024     # 单文件上限 200MB
 OFFER_TIMEOUT = 60.0             # 送文件请求 60 秒无人应答则取消
 RECV_TIMEOUT = 120.0             # 接收方收不齐数据的超时（秒），超时清理残留分片
@@ -421,6 +423,23 @@ def _make_thumb_base64(path, max_size=240, quality=62):
         buf = io.BytesIO()
         img.save(buf, "JPEG", quality=quality)
         return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception:
+        return ""
+
+
+def _get_lan_ip():
+    """探测本机局域网 IP（用于同网段直连加速）；失败返回空串。"""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        pass
+    try:
+        return socket.gethostbyname(socket.gethostname())
     except Exception:
         return ""
 
@@ -1179,7 +1198,7 @@ class MqttBackend:
         except Exception:
             pass
         tmp = r.get("tmp")
-        if r["got"] < r["total"]:
+        if not r.get("lan") and r["got"] < r["total"]:
             self._cleanup_part(tmp)
             self._fire_file(r["room"], "error", {"name": r["name"], "msg": "分片缺失，接收失败"})
             return
@@ -1476,12 +1495,28 @@ class MqttBackend:
         self._pending[tid] = {
             "name": name, "size": size, "mime": mime, "total": total,
             "md5": md5, "path": path, "room": room,
-            "accepted": False, "evt": threading.Event(), "enc": self.fernet is not None,
+            "accepted": False, "sent_via_lan": False,
+            "evt": threading.Event(), "enc": self.fernet is not None,
         }
         offer = {"kind": "offer", "id": tid, "from": self.cid, "sname": self.nickname,
                  "name": name, "size": size, "mime": mime, "total": total, "md5": md5}
         if self.fernet is not None:
             offer["enc"] = True
+        # 局域网直连加速：明文文件时开启监听，同网段对方可直连（失败自动回退 MQTT）
+        if self.fernet is None:
+            try:
+                lan_ip = _get_lan_ip()
+                if lan_ip and not lan_ip.startswith("127."):
+                    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    sock.bind(("0.0.0.0", LAN_PORT))
+                    sock.listen(1)
+                    self._pending[tid]["lan_sock"] = sock
+                    offer["lan_ip"] = lan_ip
+                    offer["lan_port"] = LAN_PORT
+                    threading.Thread(target=self._lan_listener, args=(tid,), daemon=True).start()
+            except Exception:
+                pass
         if is_image(mime):
             thumb = _make_thumb_base64(path)
             if thumb:
@@ -1499,6 +1534,15 @@ class MqttBackend:
         if data.get("enc") and self.fernet is None:
             self._fire_file(room, "error", {"name": data["name"], "msg": "对方发送了加密文件，但你未设置加密口令"})
             return
+        # 尝试局域网直连（仅明文文件；失败自动回退 MQTT）
+        if not data.get("enc"):
+            lan_ip = data.get("lan_ip")
+            try:
+                lan_port = int(data.get("lan_port", 0) or 0)
+            except Exception:
+                lan_port = 0
+            if lan_ip and lan_port and self._try_lan_receive(tid, data, lan_ip, lan_port, room):
+                return
         d = DOWNLOADS_DIR
         os.makedirs(d, exist_ok=True)
         tmp = os.path.join(d, ".p2pchat-part-" + tid)
@@ -1517,6 +1561,69 @@ class MqttBackend:
         self._publish_ctrl(room, {"kind": "accept", "id": tid, "from": self.cid, "to": data["from"]})
         self._fire_file(room, "accepting", {"name": data["name"], "size": data["size"]})
 
+    def _try_lan_receive(self, tid, data, lan_ip, lan_port, room):
+        """尝试通过局域网 TCP 直连接收；成功建立连接并启动接收线程返回 True。"""
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(2)
+            sock.connect((lan_ip, lan_port))
+            sock.settimeout(120)
+        except Exception:
+            if sock is not None:
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+            return False
+        d = DOWNLOADS_DIR
+        os.makedirs(d, exist_ok=True)
+        tmp = os.path.join(d, ".p2pchat-part-" + tid)
+        try:
+            fh = open(tmp, "wb")
+        except Exception:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return False
+        self._receivers[tid] = {
+            "name": data["name"], "size": data["size"], "mime": data["mime"],
+            "total": data["total"], "md5": data["md5"],
+            "received": set(), "got": 0, "fh": fh, "tmp": tmp,
+            "sname": data.get("sname", "对方"), "room": room, "enc": False, "lan": True,
+        }
+        threading.Thread(target=self._lan_recv, args=(tid, sock), daemon=True).start()
+        self._fire_file(room, "accepting", {"name": data["name"], "size": data["size"]})
+        return True
+
+    def _lan_recv(self, tid, sock):
+        """局域网直连接收线程：流式落盘并校验。"""
+        r = self._receivers.get(tid)
+        if r is None:
+            try:
+                sock.close()
+            except Exception:
+                pass
+            return
+        try:
+            last_pct = -1
+            while True:
+                data = sock.recv(65536)
+                if not data:
+                    break
+                r["fh"].write(data)
+                r["got"] += len(data)
+                if r["size"] > 0:
+                    pct = int(r["got"] * 100 / r["size"])
+                    if pct >= last_pct + 20:
+                        last_pct = pct
+                        self._fire_file(r["room"], "progress", {"name": r["name"], "percent": pct})
+            sock.close()
+            self._finish(tid)
+        except Exception:
+            self._fire_file(r["room"], "error", {"name": r["name"], "msg": "局域网接收失败"})
+
     def reject_file(self, tid):
         data = self._offers.pop(tid, None)
         if data is None:
@@ -1526,6 +1633,39 @@ class MqttBackend:
 
     # --------------------------- 文件发送流程 ---------------------------
 
+    def _lan_listener(self, tid):
+        """局域网直连监听线程：接受一次连接并把文件经 TCP 发给对方。"""
+        p = self._pending.get(tid)
+        if p is None:
+            return
+        sock = p.get("lan_sock")
+        if sock is None:
+            return
+        try:
+            sock.settimeout(12)
+            conn, _addr = sock.accept()
+            conn.settimeout(120)
+            with open(p["path"], "rb") as fh:
+                while True:
+                    data = fh.read(65536)
+                    if not data:
+                        break
+                    conn.sendall(data)
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if self._pending.get(tid) is p:
+                p["sent_via_lan"] = True
+                p["evt"].set()
+        except Exception:
+            pass  # 局域网直连失败/超时，回退 MQTT
+        finally:
+            try:
+                sock.close()
+            except Exception:
+                pass
+
     def _watch_send(self, tid):
         p = self._pending.get(tid)
         if p is None:
@@ -1533,6 +1673,10 @@ class MqttBackend:
         p["evt"].wait(OFFER_TIMEOUT)
         p = self._pending.get(tid)
         if p is None:
+            return
+        if p.get("sent_via_lan"):
+            self._pending.pop(tid, None)
+            self._fire_file(p["room"], "sent", {"name": p["name"], "size": p["size"], "mime": p["mime"], "path": p["path"]})
             return
         if not p.get("accepted"):
             self._pending.pop(tid, None)

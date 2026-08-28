@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1192,16 +1192,18 @@ class MqttBackend:
         try:
             import subprocess
             _flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+            # text=False（bytes 输出）避免子进程输出含非 GBK 字节时解码崩溃
+            _kw = dict(capture_output=True, timeout=6, creationflags=_flags, text=False)
             for port in (LAN_PORT, LAN_MSG_PORT):
                 rule = f"P2PChat Direct {port}"
                 subprocess.run(
                     ["netsh", "advfirewall", "firewall", "delete", "rule", f"name={rule}"],
-                    capture_output=True, timeout=6, creationflags=_flags)
+                    **_kw)
                 subprocess.run(
                     ["netsh", "advfirewall", "firewall", "add", "rule",
                      f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
                      f"localport={port}", "profile=any"],
-                    capture_output=True, timeout=6, creationflags=_flags)
+                    **_kw)
         except Exception:
             pass
 
@@ -3151,6 +3153,10 @@ class ChatApp:
             return
         self.appearance = mode
         _update_settings("appearance", mode)
+        try:
+            self._set_status("正在切换主题…", "mute")
+        except Exception:
+            pass
         # 先更新配色并重建界面，最后再切换 ctk 外观模式。ctk.set_appearance_mode 会触发
         # Windows 标题栏重绘（withdraw/deiconify）并 after(1) 恢复焦点；若在重建前调用，
         # 焦点恢复会指向已销毁的旧控件而崩溃。
@@ -3186,11 +3192,29 @@ class ChatApp:
             nick = self.nick_var.get().strip()
         except Exception:
             nick = self._profile_name
-        for w in self.root.winfo_children():
-            w.destroy()
+        # 主题重建优化：先隐藏窗口避免每个控件销毁时触发重绘，再逐批销毁
+        # （直接全部 destroy 在解放图片引用时最慢，可达 1多秒）
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        # 先释放图片引用（CTkImage 持有 Tk 图片对象，先清引用再销毁控件能显著减少释放时间）
         self._images = []
         self._thumb_cache = {}
         self._my_avatar_ctk = None
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
+        for w in list(self.root.winfo_children()):
+            try:
+                w.destroy()
+            except Exception:
+                pass
         self._last_list_fp = None
         self.root.configure(fg_color=C("app_bg"))
         self._build_ui()
@@ -3199,6 +3223,10 @@ class ChatApp:
         self._apply_session_list()
         self._render_feed()
         self._update_window_title()
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
 
     # --------------------------- 搜索防抖 ---------------------------
 
@@ -4916,7 +4944,7 @@ class ChatApp:
                 cv.bind("<Motion>", self._on_emoji_canvas_hover)
                 cv.bind("<Leave>", lambda e: cv.delete("emojihl"))
                 self._emoji_items = []  # (em, x, y)
-                self._draw_emoji_group(0)
+                self._emoji_drawn = -1  # 已绘制分组标记（-1 = 未绘制）
                 win.bind("<Escape>", lambda e: self._close_emoji_panel())
                 win.bind("<FocusOut>", lambda e: self._on_emoji_focus_out())
                 win.withdraw()
@@ -4937,13 +4965,16 @@ class ChatApp:
                 self._emoji_root_bind = None
             win.deiconify()
             win.attributes("-topmost", True)
-            win.update_idletasks()
-            w = win.winfo_reqwidth()
-            h = win.winfo_reqheight()
+            # 不强制 update_idletasks（真实窗口下那是慢的根源），用缓存尺寸定位
+            self._emoji_size = getattr(self, "_emoji_size", None) or (400, 320)
+            w, h = self._emoji_size
             x = self.root.winfo_rootx() + self.root.winfo_width() - w - 24
             y = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
-            win.geometry(f"+{max(0, x)}+{max(0, y)}")
+            win.geometry(f"{w}x{h}+{max(0, x)}+{max(0, y)}")
             self._emoji_hidden = False
+            # 绘制延后一帧：先显示空面板，表情后台逐步绘制，开启不卡
+            if getattr(self, "_emoji_drawn", -1) != getattr(self, "_emoji_group_idx", 0):
+                self.root.after(60, lambda: self._draw_emoji_group(self._emoji_group_idx))
             # 显示期间监听主窗口点击：点击主界面（非面板）即关闭（仅当次显示，用完移除）
             self._emoji_root_bind = self.root.bind("<Button-1>", self._on_click_outside, add="+")
             win.focus_force()
@@ -4961,11 +4992,16 @@ class ChatApp:
             pass
 
     def _draw_emoji_group(self, gi):
-        """在 Canvas 上绘制当前分组的表情（纯文本绘制，毫秒级）。"""
+        """在 Canvas 上绘制当前分组的表情。优化：
+        缓存 emoji 字体对象（首次加载字体最慢）、
+        图组已绘制则跳过，切换时免重复绘制。"""
         try:
+            if getattr(self, "_emoji_drawn", -1) == gi:
+                return
             cv = getattr(self, "_emoji_cv", None)
             if cv is None:
                 return
+            self._emoji_font = getattr(self, "_emoji_font", None) or ("Segoe UI Emoji", 15)
             cv.delete("all")
             cv.delete("emojihl")
             g = EMOJI_GROUPS[gi] if 0 <= gi < len(EMOJI_GROUPS) else EMOJI_GROUPS[0]
@@ -4976,14 +5012,18 @@ class ChatApp:
                 r, c = divmod(i, cols)
                 x = 4 + c * cell + cell // 2
                 y = 4 + r * cell + cell // 2
-                cv.create_text(x, y, text=em, font=("Segoe UI Emoji", 15), fill=C("text"))
+                cv.create_text(x, y, text=em, font=self._emoji_font, fill=C("text"))
                 self._emoji_items.append((em, x, y))
+            self._emoji_drawn = gi
         except Exception:
             pass
 
     def _on_emoji_canvas_click(self, event):
         """Canvas 点击命中检测：点到哪个表情就插入哪个。"""
         try:
+            # 点击时尚未绘制（延迟绘制未赶上）：同步绘制再命中
+            if not getattr(self, "_emoji_items", []):
+                self._draw_emoji_group(getattr(self, "_emoji_group_idx", 0))
             for em, x, y in getattr(self, "_emoji_items", []) or []:
                 if abs(event.x - x) <= 16 and abs(event.y - y) <= 16:
                     self._insert_emoji(em)

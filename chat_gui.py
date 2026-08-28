@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1877,6 +1877,7 @@ class ChatApp:
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._dnd = False              # 免打扰（静音通知+提示音）
         self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
+        self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
@@ -2768,10 +2769,12 @@ class ChatApp:
         kw = (self.search_var.get() or "").strip().lower()
         dm_cids = {s["cid"] for s in self._sessions.values() if s["kind"] == "dm" and s["cid"]}
 
-        groups = [r for r in self._rooms if (not kw) or kw in r.lower()]
+        groups = sorted([r for r in self._rooms if (not kw) or kw in r.lower()],
+                         key=lambda r: (0 if self._is_pinned_session(self._group_key(r)) else 1, r))
         dms = sorted([s for s in self._sessions.values()
                       if s["kind"] == "dm" and ((not kw) or kw in s["name"].lower())],
-                     key=lambda s: (-(s.get("unread") or 0), 0 if s["online"] else 1, s["name"]))
+                     key=lambda s: (0 if self._is_pinned_session(s["key"]) else 1,
+                                    -(s.get("unread") or 0), 0 if s["online"] else 1, s["name"]))
         online_others = [(cid, p["name"]) for cid, p in self._peers.items()
                          if cid != self.cid and cid not in dm_cids
                          and ((not kw) or kw in p["name"].lower())]
@@ -3273,6 +3276,9 @@ class ChatApp:
         try:
             menu = tk.Menu(self.root, tearoff=0)
             muted = self._is_muted(key)
+            pinned = self._is_pinned_session(key)
+            menu.add_command(label=("取消置顶" if pinned else "置顶会话"),
+                             command=lambda: self._toggle_pin_session(key))
             menu.add_command(label=("取消静音" if muted else "静音会话"),
                              command=lambda: self._toggle_mute(key))
             menu.tk_popup(event.x_root, event.y_root)
@@ -3289,6 +3295,9 @@ class ChatApp:
             menu.add_command(label=("取消收藏" if fav else "★ 收藏联系人"),
                              command=lambda: self._toggle_contact(s["cid"], s["name"]))
             muted = self._is_muted(s["key"])
+            pinned = self._is_pinned_session(s["key"])
+            menu.add_command(label=("取消置顶" if pinned else "置顶会话"),
+                             command=lambda: self._toggle_pin_session(s["key"]))
             menu.add_command(label=("取消静音" if muted else "静音会话"),
                              command=lambda: self._toggle_mute(s["key"]))
             menu.add_command(label="删除会话", command=lambda: self._delete_dm_session(s["key"]))
@@ -4078,6 +4087,19 @@ class ChatApp:
 
     def _is_muted(self, key):
         return key in self._muted
+
+    def _is_pinned_session(self, key):
+        return key in self._pinned_sessions
+
+    def _toggle_pin_session(self, key):
+        if key in self._pinned_sessions:
+            self._pinned_sessions.discard(key)
+            self._set_status("已取消置顶", "ok")
+        else:
+            self._pinned_sessions.add(key)
+            self._set_status("已置顶该会话", "ok")
+        _update_settings("pinned_sessions", sorted(self._pinned_sessions))
+        self._apply_session_list()
 
     def _toggle_mute(self, key):
         if key in self._muted:

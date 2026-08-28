@@ -70,7 +70,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.23"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.9.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -580,6 +580,7 @@ def _scan_dm_sessions():
 
 class MqttBackend:
     NS = "p2pchat-opensquilla"
+    DM_FILE_PREFIX = "@"          # 私聊文件传输伪房间名前缀：@对方cid
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None):
@@ -622,6 +623,12 @@ class MqttBackend:
     def _topic_room(self, room):
         return f"{self.NS}/rooms/{self._roomid(room)}"
 
+    def _file_topic_base(self, room):
+        """文件传输话题基址：群聊用房间哈希，私聊（@对方cid）用专属 dmfiles 通道。"""
+        if str(room).startswith(self.DM_FILE_PREFIX):
+            return f"{self.NS}/dmfiles/{str(room)[len(self.DM_FILE_PREFIX):]}"
+        return f"{self.NS}/rooms/{self._roomid(room)}"
+
     # --------------------------- paho 客户端 ---------------------------
 
     def _build(self):
@@ -654,6 +661,9 @@ class MqttBackend:
             self._subscribed.add(f"{self.NS}/presence/+")
             client.subscribe(self._topic_dm(), qos=1)
             self._subscribed.add(self._topic_dm())
+            # 自己的私聊文件收件箱
+            client.subscribe(f"{self.NS}/dmfiles/{self.cid}/#", qos=1)
+            self._subscribed.add(f"{self.NS}/dmfiles/{self.cid}/#")
             # 已加入的所有房间
             for room in list(self.rooms.keys()):
                 self._subscribe_room(room)
@@ -682,6 +692,8 @@ class MqttBackend:
             self._handle_dm(topic, raw)
         elif topic.startswith(f"{ns}/rooms/"):
             self._handle_room(topic, raw)
+        elif topic.startswith(f"{ns}/dmfiles/"):
+            self._handle_dmfile(topic, raw)
 
     def _handle_room(self, topic, raw):
         parts = topic.split("/")     # [ns, 'rooms', roomid, ...]
@@ -698,6 +710,25 @@ class MqttBackend:
             self._handle_ctrl(room, raw)
         elif len(tail) >= 2 and tail[0] == "file" and tail[1] == "data":
             self._handle_data(room, raw)
+
+    def _handle_dmfile(self, topic, raw):
+        # topic: {ns}/dmfiles/{target_cid}/file/ctrl|data（收件箱按自己的 cid 订阅）
+        parts = topic.split("/")
+        if len(parts) < 5:
+            return
+        tail = parts[3:]
+        if not tail or tail[0] != "file":
+            return
+        if len(tail) >= 2 and tail[1] == "ctrl":
+            try:
+                data = json.loads(raw.decode("utf-8"))
+            except Exception:
+                return
+            sender = str(data.get("from", ""))
+            if sender:
+                self._handle_ctrl(self.DM_FILE_PREFIX + sender, raw)
+        elif len(tail) >= 2 and tail[1] == "data":
+            self._handle_data("", raw)  # data 帧的 room 参数未使用，上下文取自 _receivers[tid]
 
     # --------------------------- 文本 / 在场 / 私聊 ---------------------------
 
@@ -1025,7 +1056,7 @@ class MqttBackend:
     def _publish_ctrl(self, room, obj):
         if self._client is None:
             return
-        self._client.publish(self._topic_room(room) + "/file/ctrl",
+        self._client.publish(self._file_topic_base(room) + "/file/ctrl",
                              json.dumps(obj, ensure_ascii=False), qos=1)
 
     def change_nick(self, new):
@@ -1055,6 +1086,14 @@ class MqttBackend:
     def send_file(self, room, path):
         if room not in self.rooms or not self.online or self._client is None:
             return False
+        return self._send_file_to(room, path)
+
+    def send_file_dm(self, target_cid, path):
+        if not self.online or self._client is None or not target_cid:
+            return False
+        return self._send_file_to(self.DM_FILE_PREFIX + str(target_cid), path)
+
+    def _send_file_to(self, room, path):
         path = os.path.abspath(path)
         if not os.path.isfile(path):
             return False
@@ -1136,7 +1175,7 @@ class MqttBackend:
         total, name = p["total"], p["name"]
         room = p["room"]
         path = p["path"]
-        data_topic = self._topic_room(room) + "/file/data"
+        data_topic = self._file_topic_base(room) + "/file/data"
         try:
             fh = open(path, "rb")
         except Exception:
@@ -2130,10 +2169,12 @@ class ChatApp:
             self._show_system("尚未连接，无法发送。")
             return
         s = self._sessions.get(self._current)
-        if s is None or s["kind"] != "group":
-            self._show_system("请在群聊里发送文件 / 图片。")
+        if s is None:
             return
-        self.backend.send_file(s["room"], path)
+        if s["kind"] == "group":
+            self.backend.send_file(s["room"], path)
+        else:
+            self.backend.send_file_dm(s["cid"], path)
 
     # --------------------------- 回调（切回主线程） ---------------------------
 
@@ -2438,7 +2479,13 @@ class ChatApp:
         self._scroll_bottom()
 
     def _show_file_event(self, room, event, info):
-        key = self._group_key(room)
+        if str(room).startswith("@"):
+            cid = str(room)[1:]
+            if event == "offer":
+                self._ensure_dm_session(cid, info.get("sname", "匿名"))
+            key = self._dm_key(cid)
+        else:
+            key = self._group_key(room)
         name = info.get("name", "?")
         mime = info.get("mime", "")
         size = info.get("size", 0)

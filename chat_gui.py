@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.0.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.0.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2145,6 +2145,8 @@ class ChatApp:
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
             help_menu.add_command(label="导出当前会话记录", command=self._export_current_history)
+            help_menu.add_command(label="备份全部数据…", command=self._backup_data)
+            help_menu.add_command(label="从备份恢复…", command=self._restore_data)
             help_menu.add_separator()
             help_menu.add_command(label="清空当前会话记录", command=self._clear_current_history)
             help_menu.add_command(label="清空所有会话记录", command=self._clear_all_history)
@@ -3133,6 +3135,52 @@ class ChatApp:
                 self._update_chat_title()
                 self._render_feed()
         self._apply_session_list()
+
+    def _backup_data(self):
+        """把全部聊天记录 / 设置 / 资料打包成 zip 备份。"""
+        try:
+            import zipfile
+            from tkinter import filedialog
+            path = filedialog.asksaveasfilename(title="备份数据", defaultextension=".zip",
+                                                initialfile="p2p_backup.zip",
+                                                filetypes=[("ZIP 压缩包", "*.zip")])
+            if not path:
+                return
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for fn in sorted(os.listdir(DATA_DIR)):
+                    fp = os.path.join(DATA_DIR, fn)
+                    if os.path.isfile(fp):
+                        zf.write(fp, "p2pdata/" + fn)
+            self._set_status(f"已备份到 {path}", "ok")
+        except Exception:
+            self._set_status("备份失败", "err")
+
+    def _restore_data(self):
+        """从 zip 备份恢复数据（覆盖当前数据）。"""
+        try:
+            import zipfile
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(title="选择备份文件",
+                                              filetypes=[("ZIP 压缩包", "*.zip")])
+            if not path:
+                return
+            if not messagebox.askyesno("恢复数据",
+                                       "恢复将覆盖当前的全部聊天记录与设置，确定继续吗？"):
+                return
+            count = 0
+            with zipfile.ZipFile(path, "r") as zf:
+                for member in zf.namelist():
+                    if member.startswith("p2pdata/"):
+                        fn = os.path.basename(member)
+                        if not fn or ".." in fn:
+                            continue
+                        data = zf.read(member)
+                        with open(os.path.join(DATA_DIR, fn), "wb") as fh:
+                            fh.write(data)
+                        count += 1
+            self._set_status(f"已恢复 {count} 个文件（重启后生效）", "ok")
+        except Exception:
+            self._set_status("恢复失败", "err")
 
     def _export_current_history(self):
         """把当前会话的聊天记录导出为 txt 文件。"""

@@ -17,8 +17,9 @@ downloads/
 
 # 临时诊断文件
 _diag*.py
+_smoke*.py
 
-# 系统/编辑器
+# 系统 / 编辑器
 Thumbs.db
 .DS_Store
 .idea/

@@ -3,7 +3,7 @@
 ; 安装时自动检测已装版本，并询问是否先卸载旧版本
 
 #define MyAppName "P2P聊天"
-#define MyAppVersion "1.7.1"
+#define MyAppVersion "1.8.0"
 #define MyAppPublisher "P2PChat"
 #define MyAppExeName "P2PChat.exe"
 
@@ -29,6 +29,7 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 
 [Languages]
+Name: "cn"; MessagesFile: "ChineseSimplified.isl"
 Name: "en"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

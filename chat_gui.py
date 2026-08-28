@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -320,6 +320,16 @@ def _load_ctk_image(path, w, h):
         return CTkImage(light_image=img, dark_image=img, size=(w, h))
     except Exception:
         return None
+
+
+def _name_color(name):
+    """根据昵称生成稳定的头像底色（Discord 风格彩色首字母）。"""
+    palette = ["#5865f2", "#3ba55d", "#faa61a", "#ed4245", "#eb459e",
+               "#00a8fc", "#9146ff", "#f47fff"]
+    h = 0
+    for ch in str(name):
+        h = (h * 31 + ord(ch)) & 0xffffffff
+    return palette[h % len(palette)]
 
 
 def _load_rooms():
@@ -1043,6 +1053,7 @@ class ChatApp:
         self._thumb_cache = {}      # 图片缩略图缓存：path -> CTkImage
         self._search_after = None   # 搜索防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
+        self._history_expanded = False  # 是否已展开“更早消息”
 
         self.root.title("P2P 聊天")
         self.root.geometry("1000x680")
@@ -1297,8 +1308,10 @@ class ChatApp:
             self.top_avatar.configure(image=img, text="", fg_color="transparent")
             self._avatar_ref = img
         else:
-            self.top_avatar.configure(image=None, text="👤", fg_color=C("input_bg"),
-                                      text_color=C("text_mute"), font=(FONT, 16))
+            name = self._profile_name or "?"
+            self.top_avatar.configure(image=None, text=name[:1].upper(),
+                                      fg_color=_name_color(name),
+                                      text_color="#ffffff", font=(FONT, 15, "bold"))
 
     def _change_avatar(self):
         # 直接在主界面换头像，不再弹独立登录框
@@ -1495,6 +1508,7 @@ class ChatApp:
         if key is None or key not in self._sessions:
             return
         self._current = key
+        self._history_expanded = False
         s = self._sessions[key]
         s["unread"] = 0
         self._update_chat_title()
@@ -1790,6 +1804,8 @@ class ChatApp:
         name = self.nick_var.get().strip() or "未命名"
         self._profile_name = name
         _save_profile(name, self._avatar)
+        if not self._avatar:
+            self._render_top_avatar()
         if self.backend and self.backend.running:
             self.backend.change_nick(name)
 
@@ -2120,6 +2136,10 @@ class ChatApp:
         except Exception:
             pass
 
+    def _expand_history(self):
+        self._history_expanded = True
+        self._render_feed()
+
     def _render_feed(self):
         for w in self.feed.winfo_children():
             w.destroy()
@@ -2131,10 +2151,13 @@ class ChatApp:
                          text_color=C("text_mute"), font=(FONT, 11)).pack(pady=20)
             return
         msgs = s["messages"]
-        if len(msgs) > self.RENDER_MAX:
-            ctk.CTkLabel(self.feed, text=f"… 更早的 {len(msgs) - self.RENDER_MAX} 条消息",
-                         text_color=C("text_mute"), font=(FONT, 10),
-                         justify="center").pack(pady=4)
+        if len(msgs) > self.RENDER_MAX and not self._history_expanded:
+            remaining = len(msgs) - self.RENDER_MAX
+            lbl = ctk.CTkLabel(self.feed, text=f"… 更早的 {remaining} 条消息 · 点击展开",
+                               text_color=C("accent"), font=(FONT, 10, "bold"),
+                               cursor="hand2", justify="center")
+            lbl.pack(pady=4)
+            lbl.bind("<Button-1>", lambda e: self._expand_history())
             msgs = msgs[-self.RENDER_MAX:]
         last_day = None
         for idx, m in enumerate(msgs):

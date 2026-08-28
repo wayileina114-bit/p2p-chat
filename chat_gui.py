@@ -69,7 +69,7 @@ _DND_READY = False
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.8.14"           # 程序版本（每次更新时 +1）
+APP_VERSION = "1.8.15"           # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1381,6 +1381,7 @@ class ChatApp:
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
             help_menu.add_command(label="清空当前会话记录", command=self._clear_current_history)
+            help_menu.add_command(label="清空所有会话记录", command=self._clear_all_history)
             help_menu.add_command(label="打开收件文件夹", command=self._open_downloads)
             menubar.add_cascade(label="帮助", menu=help_menu)
             self.root.config(menu=menubar)
@@ -1947,6 +1948,24 @@ class ChatApp:
         self._apply_session_list()
         self._set_status("已清空当前会话记录", "ok")
 
+    def _clear_all_history(self):
+        if not self._sessions:
+            messagebox.showinfo("提示", "当前没有任何会话记录。")
+            return
+        if not messagebox.askyesno("清空所有记录",
+                                   "确定清空全部会话的聊天记录吗？此操作不可撤销。"):
+            return
+        for s in self._sessions.values():
+            s["messages"] = []
+            s["unread"] = 0
+            if s["kind"] == "group":
+                _delete_group_history(s["room"])
+            else:
+                _delete_dm_history(s["cid"])
+        self._render_feed()
+        self._apply_session_list()
+        self._set_status("已清空所有会话记录", "ok")
+
     def _delete_dm_session(self, key):
         s = self._sessions.get(key)
         if s is None or s["kind"] != "dm":
@@ -2149,6 +2168,15 @@ class ChatApp:
         except Exception:
             pass
 
+    def _maybe_scroll_bottom(self):
+        """新内容到达时，仅当用户已在底部附近才自动滚动，避免打断向上翻阅历史。"""
+        try:
+            _top, bottom = self.feed._parent_canvas.yview()
+            if float(bottom) >= 0.98:
+                self.feed._parent_canvas.yview_moveto(1.0)
+        except Exception:
+            self._scroll_bottom()
+
     def _add_file_offer_card(self, key, room, info):
         # 在聊天区渲染一条需手动确认的文件请求卡片（不弹窗）
         if key != self._current:
@@ -2198,7 +2226,7 @@ class ChatApp:
                                    font=(FONT, 11, "bold"), command=_accept)
         accept_btn.pack(side="right")
         self._pending_offers[tid] = card
-        self._scroll_bottom()
+        self._maybe_scroll_bottom()
         self._trim_feed()
 
     @staticmethod
@@ -2230,7 +2258,7 @@ class ChatApp:
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p))
-        self._scroll_bottom()
+        self._maybe_scroll_bottom()
         self._trim_feed()
 
     def _add_image_bubble(self, name, path, mine, ts=None, show_head=True):
@@ -2270,7 +2298,7 @@ class ChatApp:
             _img.pack(padx=6, pady=4)
             _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
             _img.bind("<Button-3>", lambda e, p=path: self._message_menu(e, p, p))
-            self._scroll_bottom()
+            self._maybe_scroll_bottom()
             self._trim_feed()
         except Exception:
             self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts)
@@ -2332,7 +2360,7 @@ class ChatApp:
             return
         ctk.CTkLabel(self.feed, text=text, text_color=C("text_mute"), wraplength=560,
                      justify="center", font=(FONT, 10)).pack(pady=6)
-        self._scroll_bottom()
+        self._maybe_scroll_bottom()
         self._trim_feed()
 
     def _trim_feed(self):

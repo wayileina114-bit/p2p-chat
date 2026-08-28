@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -661,7 +661,7 @@ class MqttBackend:
 
     def __init__(self, nickname, cid, broker=DEFAULT_BROKER, port=DEFAULT_PORT,
                  on_text=None, on_peers=None, on_file=None, on_status=None, on_dm=None,
-                 on_recall=None, passphrase=""):
+                 on_recall=None, on_read=None, passphrase=""):
         self.nickname = nickname or "匿名"
         self.cid = cid
         self.broker = broker
@@ -674,6 +674,7 @@ class MqttBackend:
         self.on_status = on_status
         self.on_dm = on_dm
         self.on_recall = on_recall
+        self.on_read = on_read
 
         self.online = False
         self.running = False
@@ -835,6 +836,9 @@ class MqttBackend:
         if data.get("kind") == "recall":
             self._fire_recall(room, str(data.get("mid", "")), str(data.get("cid", "")))
             return
+        if data.get("kind") == "read":
+            self._fire_read(room, str(data.get("mid", "")), str(data.get("cid", "")), str(data.get("name", "匿名")))
+            return
         if data.get("cid") == self.cid:
             return
         self._fire_text(room, str(data.get("name", "匿名"))[:60],
@@ -910,6 +914,9 @@ class MqttBackend:
         sender = data.get("cid", "")
         if data.get("kind") == "recall":
             self._fire_recall(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender))
+            return
+        if data.get("kind") == "read":
+            self._fire_read(self.DM_FILE_PREFIX + str(sender), str(data.get("mid", "")), str(sender), str(data.get("name", "匿名")))
             return
         if not sender or sender == self.cid:
             return
@@ -1216,6 +1223,17 @@ class MqttBackend:
             self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
         return True
 
+    def send_read(self, target, mid, is_dm=False):
+        """发送已读回执：告知对方我已看到该消息。"""
+        if not mid or not self.online or self._client is None:
+            return False
+        payload = json.dumps({"kind": "read", "mid": mid, "cid": self.cid, "name": self.nickname}, ensure_ascii=False)
+        if is_dm:
+            self._client.publish(f"{self.NS}/dms/{target}", payload, qos=1)
+        else:
+            self._client.publish(self._topic_room(target) + "/msg", payload, qos=1)
+        return True
+
     def send_file(self, room, path):
         if room not in self.rooms or not self.online or self._client is None:
             return False
@@ -1359,6 +1377,10 @@ class MqttBackend:
         if self.on_recall:
             self.on_recall(room, mid, who)
 
+    def _fire_read(self, room, mid, cid, name):
+        if self.on_read:
+            self.on_read(room, mid, cid, name)
+
     def _fire_peers(self):
         if self.on_peers:
             self.on_peers({cid: {"name": p["name"], "rooms": list(p.get("rooms") or [])}
@@ -1419,6 +1441,7 @@ class ChatApp:
         self._thumb_cache = {}      # 图片缩略图缓存：path -> CTkImage
         self._my_avatar_ctk = None  # 自己的圆形头像缓存
         self._last_title = ""       # 窗口标题缓存（避免频繁重设）
+        self._read_acked = set()     # 已发送过已读回执的消息 mid
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -2383,6 +2406,7 @@ class ChatApp:
             on_file=self._cb_file,
             on_status=self._cb_status,
             on_dm=self._cb_dm,
+            on_read=self._cb_read,
             passphrase=self.encrypt_pass,
         )
         for room in self._rooms:
@@ -2640,11 +2664,48 @@ class ChatApp:
     def _cb_dm(self, from_cid, name, text, mid=None):
         self.root.after(0, lambda: self._receive_dm(from_cid, name, text, mid))
 
+    def _cb_read(self, room, mid, cid, name):
+        self.root.after(0, lambda: self._receive_read(room, mid, cid, name))
+
     def _receive_dm(self, from_cid, name, text, mid=None):
         s = self._ensure_dm_session(from_cid, name)
         s["online"] = True
         self._append_message(s["key"], name, text, False, mid=mid)
         self._schedule_session_list()
+
+    def _receive_read(self, room, mid, cid, name):
+        """收到已读回执：给对应消息标记谁已读。"""
+        if not mid:
+            return
+        if str(room).startswith("@"):
+            key = self._dm_key(str(room)[1:])
+        else:
+            key = self._group_key(room)
+        s = self._sessions.get(key)
+        if s is None:
+            return
+        for m in s["messages"]:
+            if m.get("mid") == mid and m.get("mine"):
+                names = m.setdefault("read_by", [])
+                if name and name not in names:
+                    names.append(name)
+                self._save_session(s)
+                if key == self._current:
+                    self._render_feed()
+                return
+
+    def _ack_reads(self, s):
+        """对会话里已显示的他人消息发送已读回执（每条只发一次）。"""
+        if not (self.backend and self.backend.online):
+            return
+        is_dm = s.get("kind") == "dm"
+        target = s.get("cid") if is_dm else s.get("room")
+        for m in s.get("messages", []):
+            mid = m.get("mid")
+            if not mid or m.get("mine") or mid in self._read_acked:
+                continue
+            self._read_acked.add(mid)
+            self.backend.send_read(target, mid, is_dm)
 
     def _refresh_peers(self, peers):
         self._peers = peers or {}
@@ -2817,7 +2878,8 @@ class ChatApp:
             bubble.pack(side="left", padx=(GAP if show_head else 0, 0))
         return bubble
 
-    def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None):
+    def _add_bubble(self, name, text, mine, ts=None, show_head=True, file_path=None,
+                     read_by=None):
         tstr = _fmt_time(ts) if ts else ""
         bubble = self._message_row(name, mine, show_head)
         if show_head:
@@ -2833,6 +2895,12 @@ class ChatApp:
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p))
+        if mine and read_by:
+            names = "、".join(read_by[:5])
+            if len(read_by) > 5:
+                names += f" 等 {len(read_by)} 人"
+            ctk.CTkLabel(bubble, text=f"已读 {names}", text_color=C("text_mute"),
+                         font=(FONT, 9)).pack(anchor="e", padx=12, pady=(0, 4))
         self._maybe_scroll_bottom()
         self._trim_feed()
 
@@ -2976,8 +3044,9 @@ class ChatApp:
                 self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
             else:
                 self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
-                                 file_path=m.get("file_path"))
+                                 file_path=m.get("file_path"), read_by=m.get("read_by"))
         self._scroll_bottom()
+        self._ack_reads(s)
 
     def _show_image_preview(self, key, room, info):
         """图片 offer 到达：立即显示低画质缩略图预览，并自动接收原图（QQ 式内联）。"""

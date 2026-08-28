@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.1.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.1.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1328,6 +1328,22 @@ class MqttBackend:
 # ---------------------------------------------------------------------------
 
 
+def _ver_parts(v):
+    """把版本号字符串转成数字元组（如 2.1.0 -> (2,1,0)），便于比较排序。"""
+    out = []
+    for tok in str(v).split("."):
+        num = ""
+        for ch in tok:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        out.append(int(num) if num else 0)
+    while len(out) < 3:
+        out.append(0)
+    return out
+
+
 class ChatApp:
     FEED_MAX = 400         # 每个会话持久化的历史消息上限
     RENDER_MAX = 150       # 切换会话时最多立即渲染的消息条数（更早的折叠）
@@ -1705,29 +1721,54 @@ class ChatApp:
     def _show_about(self):
         AboutDialog(self.root)
 
-    def check_for_update(self):
-        """后台静默检查 GitHub Releases 是否有新版本，有则弹窗提示。"""
+    def _fetch_releases(self):
+        """拉取全部 GitHub Releases（最多 100 个）。"""
         import urllib.request
+        url = (f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}"
+               f"/releases?per_page=100")
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "P2PChat-App",
+            "Accept": "application/vnd.github+json",
+        })
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read().decode("utf-8", "replace"))
 
+    def _show_version_manager(self, rels):
+        """用版本列表打开版本管理对话框（支持升级 + 回退）。"""
+        versions = []
+        for r in rels:
+            tag = str(r.get("tag_name", "")).lstrip("vV").strip()
+            if not tag:
+                continue
+            versions.append({
+                "tag": tag,
+                "body": (str(r.get("body", "")).strip()
+                         .replace("\r\n", "\n").replace("\r", "\n")),
+                "dl": self._pick_asset_url(r),
+                "html": r.get("html_url", ""),
+            })
+        if not versions:
+            self._set_status("没有可用版本", "err")
+            return
+        try:
+            dlg = VersionManagerDialog(self.root, versions, APP_VERSION,
+                                       self._download_and_run_installer)
+            self.root.wait_window(dlg.top)
+        except Exception:
+            pass
+
+    def check_for_update(self):
+        """后台静默检查更新：若发现新版本，打开版本管理（展示累积更新内容）。"""
         def work():
             try:
-                url = (f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}"
-                       f"/releases/latest")
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "P2PChat-App",
-                    "Accept": "application/vnd.github+json",
-                })
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = json.loads(r.read().decode("utf-8", "replace"))
-                latest = str(data.get("tag_name", "")).lstrip("vV").strip()
-                if not latest:
-                    return
-                if self._is_newer(latest, APP_VERSION):
-                    body = (str(data.get("body", "")).strip()
-                            .replace("\r\n", "\n").replace("\r", "\n"))
-                    notes = data.get("html_url", "")
-                    dl = self._pick_asset_url(data)
-                    self.root.after(0, lambda: self._prompt_update(latest, body, notes, dl))
+                rels = self._fetch_releases()
+                newest = ""
+                for r in rels:
+                    t = str(r.get("tag_name", "")).lstrip("vV").strip()
+                    if t and _ver_parts(t) > _ver_parts(newest):
+                        newest = t
+                if newest and _ver_parts(newest) > _ver_parts(APP_VERSION):
+                    self.root.after(0, lambda: self._show_version_manager(rels))
             except Exception:
                 pass  # 检查失败静默忽略，不打扰用户
 
@@ -1823,34 +1864,16 @@ class ChatApp:
             self._set_status("已下载到：" + path + "（请手动运行）", "err")
 
     def _manual_check_update(self):
-        """手动检查更新：带明确结果反馈（已最新 / 发现新版 / 失败）。"""
-        import urllib.request
-
+        """手动检查更新：打开版本管理，可查看所有版本并下载（含回退）。"""
         def work():
             try:
-                url = (f"https://api.github.com/repos/{UPDATE_OWNER}/{UPDATE_REPO}"
-                       f"/releases/latest")
-                req = urllib.request.Request(url, headers={
-                    "User-Agent": "P2PChat-App",
-                    "Accept": "application/vnd.github+json",
-                })
-                with urllib.request.urlopen(req, timeout=8) as r:
-                    data = json.loads(r.read().decode("utf-8", "replace"))
-                latest = str(data.get("tag_name", "")).lstrip("vV").strip()
-                if latest and self._is_newer(latest, APP_VERSION):
-                    body = (str(data.get("body", "")).strip()
-                            .replace("\r\n", "\n").replace("\r", "\n"))
-                    notes = data.get("html_url", "")
-                    dl = self._pick_asset_url(data)
-                    self.root.after(0, lambda: self._prompt_update(latest, body, notes, dl))
-                else:
-                    self.root.after(0, lambda: self._set_status(
-                        f"已是最新版本 v{APP_VERSION}", "ok"))
+                rels = self._fetch_releases()
+                self.root.after(0, lambda: self._show_version_manager(rels))
             except Exception:
                 self.root.after(0, lambda: self._set_status(
                     "检查更新失败，请稍后重试", "err"))
 
-        self._set_status("正在检查更新…", "mute")
+        self._set_status("正在获取版本列表…", "mute")
         threading.Thread(target=work, daemon=True).start()
 
     # --------------------------- 会话管理 ---------------------------
@@ -2999,6 +3022,114 @@ class AboutDialog:
             self.install_btn.configure(state="disabled", text="环境已完整")
             self._append_log("\n✅ 组件已安装。部分功能需重启程序后生效。\n")
 
+
+class VersionManagerDialog:
+    """版本管理对话框：列出所有版本，支持查看累积更新内容、下载任意版本（含回退）。"""
+
+    def __init__(self, master, versions, current, download_cb):
+        self.versions = versions            # [{tag, body, dl, html}]
+        self.current = str(current).lstrip("vV").strip()
+        self.download_cb = download_cb
+        self.versions.sort(key=lambda v: _ver_parts(v["tag"]), reverse=True)
+        self._selected = self.versions[0]["tag"] if self.versions else ""
+
+        top = ctk.CTkToplevel(master)
+        self.top = top
+        top.title("版本管理 / 更新")
+        top.geometry("560x580")
+        top.resizable(False, False)
+        top.transient(master)
+        top.configure(fg_color=C("app_bg"))
+        top.bind("<Escape>", lambda e: top.destroy())
+        try:
+            top.grab_set()
+        except Exception:
+            pass
+
+        ctk.CTkLabel(top, text="版本管理", font=(FONT, 16, "bold"),
+                     text_color=C("text")).pack(pady=(16, 2))
+        ctk.CTkLabel(top, text=f"当前版本：v{self.current}", font=(FONT, 11),
+                     text_color=C("text_mute")).pack()
+
+        self.var = ctk.StringVar(value=self._label(self._selected))
+        tags = [self._label(v["tag"]) for v in self.versions]
+        self.combo = ctk.CTkComboBox(top, variable=self.var, values=tags, width=260, height=30,
+                                     corner_radius=8, fg_color=C("input_bg"), text_color=C("text"),
+                                     button_color=C("input_hover"), button_hover_color=C("input_hover"),
+                                     dropdown_fg_color=C("panel"), dropdown_text_color=C("text"),
+                                     font=(FONT, 12), dropdown_font=(FONT, 12),
+                                     command=self._on_select)
+        self.combo.pack(pady=(8, 6))
+
+        self.body_box = ctk.CTkTextbox(top, corner_radius=10, fg_color=C("panel_2"),
+                                       text_color=C("text_2"), font=(FONT, 11), wrap="word")
+        self.body_box.pack(fill="both", expand=True, padx=18, pady=8)
+        self._render_body()
+
+        btnrow = ctk.CTkFrame(top, fg_color="transparent")
+        btnrow.pack(fill="x", padx=18, pady=(0, 16))
+        self.dl_btn = ctk.CTkButton(btnrow, text="下载并安装", height=36, corner_radius=10,
+                                    font=(FONT, 12, "bold"), command=self._do_download)
+        self.dl_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(btnrow, text="关闭", width=90, height=36, corner_radius=10,
+                      fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
+                      font=(FONT, 12), command=top.destroy).pack(side="right")
+
+    def _label(self, tag):
+        return "v" + str(tag) + ("（当前）" if str(tag) == self.current else "")
+
+    def _on_select(self, value):
+        tag = value.replace("（当前）", "").lstrip("vV").strip()
+        self._selected = tag
+        self._render_body()
+
+    def _sel_obj(self):
+        for v in self.versions:
+            if v["tag"] == self._selected:
+                return v
+        return None
+
+    def _render_body(self):
+        self.body_box.configure(state="normal")
+        self.body_box.delete("1.0", "end")
+        if not self.versions:
+            self.body_box.insert("1.0", "没有可用版本。")
+            self.body_box.configure(state="disabled")
+            return
+        sel = self._selected
+        cur, target = _ver_parts(self.current), _ver_parts(sel)
+        if target == cur:
+            text = f"你当前已经是 v{sel}。\n\n可以在上方选择其它版本下载（升级或回退）。"
+        elif target > cur:
+            items = [v for v in self.versions if cur < _ver_parts(v["tag"]) <= target]
+            items.sort(key=lambda v: _ver_parts(v["tag"]))
+            lines = [f"从 v{self.current} 升级到 v{sel} 的累积更新内容：\n"]
+            for v in items:
+                body = (v["body"] or "").strip()
+                lines.append(f"━━━ v{v['tag']} ━━━")
+                lines.append(body if body else "（无详细说明）")
+                lines.append("")
+            text = "\n".join(lines)
+        else:
+            v = self._sel_obj() or {}
+            body = (v.get("body") or "").strip()
+            text = (f"⚠️ 你将回退到旧版本 v{sel}（比当前 v{self.current} 更早）。\n\n"
+                    f"该版本更新内容：\n{body if body else '（无详细说明）'}")
+        self.body_box.insert("1.0", text)
+        self.body_box.configure(state="disabled")
+
+    def _do_download(self):
+        v = self._sel_obj()
+        if not v:
+            return
+        if not v.get("dl"):
+            import webbrowser
+            webbrowser.open(v.get("html") or
+                            f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}/releases")
+            return
+        self.top.destroy()
+        if self.download_cb:
+            self.download_cb(v["dl"])
 
 class UpdateDialog:
     """发现新版本时的提示框：展示版本号 / 更新内容 / 跳转下载。"""

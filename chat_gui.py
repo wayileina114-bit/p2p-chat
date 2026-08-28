@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.1.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.1.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -627,6 +627,35 @@ def _name_color(name):
     for ch in str(name):
         h = (h * 31 + ord(ch)) & 0xffffffff
     return palette[h % len(palette)]
+
+
+_URL_RE = None
+
+
+def _extract_urls(text):
+    """从文本中提取 http(s):// 开头的链接（去重、去掉尾部标点）。"""
+    global _URL_RE
+    if _URL_RE is None:
+        import re
+        _URL_RE = re.compile(r"https?://[^\s　、。，一-鿿]+", re.IGNORECASE)
+    try:
+        out = []
+        for m in _URL_RE.findall(str(text or "")):
+            u = m.rstrip(".,;:!?)]}>，。；：！？）》、】")
+            if u and u not in out:
+                out.append(u)
+        return out[:6]
+    except Exception:
+        return []
+
+
+def _open_url(url):
+    """用系统默认浏览器打开链接。"""
+    try:
+        import webbrowser
+        webbrowser.open(url)
+    except Exception:
+        pass
 
 
 def _play_notify_sound():
@@ -3620,6 +3649,16 @@ class ChatApp:
         ctk.CTkLabel(self.session_frame, text=text, text_color=C("section"),
                      font=(FONT, 10, "bold"), anchor="w").pack(fill="x", padx=6, pady=(10, 2))
 
+    def _session_avatar(self, parent, name, is_group=False, size=26):
+        """会话列表圆形首字母头像（Discord/QQ 风格）：群聊显示 #，私聊显示昵称首字母。"""
+        ch = ("#" if is_group else (str(name or "?")[:1].upper() or "?"))
+        fg = C("input_bg") if is_group else _name_color(name or "?")
+        av = ctk.CTkLabel(parent, text=ch, width=size, height=size, corner_radius=size // 2,
+                          fg_color=fg, text_color="#ffffff", font=(FONT, 12 if is_group else 11, "bold"),
+                          cursor="hand2")
+        av.pack(side="left", padx=(8, 2), pady=6)
+        return av
+
     def _unread_badge(self, parent, n):
         txt = str(n) if n < 100 else "99+"
         w = max(20, 16 + (len(txt) - 1) * 8)
@@ -3662,10 +3701,7 @@ class ChatApp:
         row = ctk.CTkFrame(self.session_frame, corner_radius=8,
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
-        hash_lbl = ctk.CTkLabel(row, text="#", width=18, anchor="n",
-                                text_color=(C("accent") if selected else C("text_mute")),
-                                font=(FONT, 13, "bold"), cursor="hand2")
-        hash_lbl.pack(side="left", padx=(10, 0), pady=(6, 0))
+        av = self._session_avatar(row, room, is_group=True)
         muted = self._is_muted(key)
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
@@ -3683,7 +3719,7 @@ class ChatApp:
                          font=(FONT, 11, "bold"), cursor="hand2").pack(side="right", padx=(0, 6))
         cross = ctk.CTkLabel(row, text="✕", width=24, text_color=C("text_mute"), cursor="hand2")
         cross.pack(side="right", padx=(0, 6))
-        for w in [row, hash_lbl] + list(mid.winfo_children()):
+        for w in [row, av] + list(mid.winfo_children()):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
             w.bind("<Button-3>", lambda e, k=key: self._group_context_menu(e, k))
         cross.bind("<Button-1>", lambda e, r=room: self._remove_room(r))
@@ -3697,10 +3733,7 @@ class ChatApp:
         row = ctk.CTkFrame(self.session_frame, corner_radius=8,
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
-        dot = ctk.CTkLabel(row, text="●" if s["online"] else "○", width=18, anchor="n",
-                           text_color=(C("online") if s["online"] else C("text_mute")),
-                           font=(FONT, 11, "bold"), cursor="hand2")
-        dot.pack(side="left", padx=(10, 0), pady=(6, 0))
+        av = self._session_avatar(row, s["name"])
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
         ctk.CTkLabel(mid, text=(("🔕 " + s["name"]) if self._is_muted(key) else s["name"]), anchor="w",
@@ -3710,12 +3743,16 @@ class ChatApp:
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
+        dot = ctk.CTkLabel(row, text="●" if s["online"] else "○", width=14, anchor="e",
+                           text_color=(C("online") if s["online"] else C("text_mute")),
+                           font=(FONT, 9, "bold"), cursor="hand2")
+        dot.pack(side="right", padx=(0, 4))
         if unread:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 10))
         if s.get("@me"):
             ctk.CTkLabel(row, text="@", text_color=C("accent"),
                          font=(FONT, 11, "bold"), cursor="hand2").pack(side="right", padx=(0, 6))
-        for w in [row, dot] + list(mid.winfo_children()):
+        for w in [row, av, dot] + list(mid.winfo_children()):
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
             w.bind("<Button-3>", lambda e, s=s: self._dm_context_menu(e, s))
         self._bind_row_hover(row, selected)
@@ -3725,13 +3762,14 @@ class ChatApp:
         cid, name = c["cid"], c["name"]
         row = ctk.CTkFrame(self.session_frame, corner_radius=8, fg_color="transparent")
         row.pack(fill="x", pady=1)
-        star = ctk.CTkLabel(row, text="★", width=18, anchor="w", text_color=C("accent"),
-                            font=(FONT, 12, "bold"), cursor="hand2")
-        star.pack(side="left", padx=(10, 0), pady=7)
+        av = self._session_avatar(row, name)
+        star = ctk.CTkLabel(row, text="★", width=16, anchor="w", text_color=C("accent"),
+                            font=(FONT, 11, "bold"), cursor="hand2")
+        star.pack(side="left", padx=(2, 0), pady=8)
         lbl = ctk.CTkLabel(row, text=name, anchor="w", text_color=C("text"),
                            font=(FONT, 12), cursor="hand2")
         lbl.pack(side="left", fill="x", expand=True, pady=7)
-        for w in (row, lbl, star):
+        for w in (row, lbl, star, av):
             w.bind("<Button-1>", lambda e, c=cid, nm=name: self._start_dm(c, nm))
         row.bind("<Button-3>", lambda e, c=cid, nm=name: self._contact_context_menu(e, c, nm))
         self._bind_row_hover(row, False)
@@ -3750,13 +3788,11 @@ class ChatApp:
     def _add_member_item(self, cid, name):
         row = ctk.CTkFrame(self.session_frame, corner_radius=8, fg_color="transparent")
         row.pack(fill="x", pady=1)
-        dot = ctk.CTkLabel(row, text="●", width=18, anchor="w", text_color=C("online"),
-                           font=(FONT, 11, "bold"), cursor="hand2")
-        dot.pack(side="left", padx=(10, 0), pady=7)
+        av = self._session_avatar(row, name)
         lbl = ctk.CTkLabel(row, text=name, anchor="w", text_color=C("text"),
                            font=(FONT, 12), cursor="hand2")
         lbl.pack(side="left", fill="x", expand=True, pady=7)
-        for w in (row, lbl, dot):
+        for w in (row, lbl, av):
             w.bind("<Button-1>", lambda e, c=cid, nm=name: self._start_dm(c, nm))
         self._bind_row_hover(row, False)
 
@@ -5353,6 +5389,16 @@ class ChatApp:
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
         body.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
         bubble.bind("<Double-Button-1>", lambda e, t=text: self._copy_to_clipboard(t))
+        # 消息内链接：识别 URL 生成可点击标签（QQ/微信/Discord 风格，点击浏览器打开）
+        urls = _extract_urls(text)
+        if urls:
+            for u in urls:
+                link = ctk.CTkLabel(bubble, text=u, wraplength=460, justify="left",
+                                    text_color=C("accent"), font=(FONT, 12, "underline"),
+                                    cursor="hand2")
+                link.pack(anchor="w", padx=12, pady=(0, 6))
+                link.bind("<Button-1>", lambda e, u=u: _open_url(u))
+                link.bind("<Button-3>", lambda e, t=u: self._message_menu(e, t, None, mine=mine, mid=mid, name=name))
         if file_path:
             # QQ 式：点击文件消息直接打开/下载
             def _open_file(_e, p=file_path):

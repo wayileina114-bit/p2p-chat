@@ -91,7 +91,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "2.2.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "2.2.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1626,6 +1626,7 @@ class ChatApp:
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
         self._history_expanded = False  # 是否已展开“更早消息”
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
+        self.notify_popup = bool(_load_settings().get("notify_popup", True))
         self.encrypt_pass = str(_load_settings().get("encrypt_pass", "") or "")
 
         self.root.title("P2P 聊天")
@@ -1851,6 +1852,9 @@ class ChatApp:
             self._sound_var = tk.BooleanVar(value=self.notify_sound)
             settings_menu.add_checkbutton(label="新消息提示音", variable=self._sound_var,
                                           command=self._toggle_notify_sound)
+            self._popup_var = tk.BooleanVar(value=self.notify_popup)
+            settings_menu.add_checkbutton(label="Windows 通知弹窗", variable=self._popup_var,
+                                          command=self._toggle_notify_popup)
             settings_menu.add_separator()
             settings_menu.add_command(label="加密口令…", command=self._set_encrypt_pass)
             menubar.add_cascade(label="设置", menu=settings_menu)
@@ -1873,6 +1877,10 @@ class ChatApp:
     def _toggle_notify_sound(self):
         self.notify_sound = bool(self._sound_var.get())
         _update_settings("notify_sound", self.notify_sound)
+
+    def _toggle_notify_popup(self):
+        self.notify_popup = bool(self._popup_var.get())
+        _update_settings("notify_popup", self.notify_popup)
 
     def _set_encrypt_pass(self):
         """设置端到端加密口令：留空则关闭加密。双方需用相同口令才能互看消息。"""
@@ -2451,6 +2459,8 @@ class ChatApp:
     def _maybe_notify(self, s, name, text, mine, system):
         """后台/非当前会话收到新消息时弹 Windows 通知；前台正在看时静默。"""
         if mine or system:
+            return
+        if not self.notify_popup:
             return
         if s["key"] == self._current and self._window_focused:
             return

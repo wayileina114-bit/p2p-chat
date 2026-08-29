@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.3.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.3.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2996,6 +2996,8 @@ class ChatApp:
         self._hover_after = None       # 浮层显示/隐藏的延时 timer id
         self._last_badge_n = None      # 上次任务栏角标的未读数（无变化不重绘）
         self._hover_inside = False      # 鼠标是否仍在悬停目标上
+        self._emoji_focus_after = None  # 表情面板失焦延迟关闭的定时器 id（可取消）
+        self._emoji_opened_at = 0.0     # 表情面板最近一次打开时间（刚打开瞬间的焦点抖动不关面板）
         self._overlay_hicon = 0        # 当前任务栏角标 HICON（替换前销毁旧句柄）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
@@ -5869,6 +5871,7 @@ class ChatApp:
                 self._emoji_drawn = -1  # 已绘制分组标记（-1 = 未绘制）
                 win.bind("<Escape>", lambda e: self._close_emoji_panel())
                 win.bind("<FocusOut>", lambda e: self._on_emoji_focus_out())
+                win.bind("<FocusIn>", lambda e: self._on_emoji_focus_in())
                 # 给窗口显式设置尺寸（避免默认宽度），并记录为缓存尺寸：之后显示用它定位
                 try:
                     self._emoji_size = (cols * cell + 16, 8 * cell + 96)
@@ -5892,6 +5895,8 @@ class ChatApp:
                 except Exception:
                     pass
                 self._emoji_root_bind = None
+            self._cancel_emoji_focus_after()   # 取消上一次遗留的失焦关闭定时器
+            self._emoji_opened_at = time.time()  # 刚打开瞬间的焦点抖动不视为"点到外部"
             win.deiconify()
             win.attributes("-topmost", True)
             # 用创建时记录的真实尺寸定位，弹出在情绪按钮右上方（贴近输入区）
@@ -5922,14 +5927,43 @@ class ChatApp:
             pass
 
     def _on_emoji_focus_out(self):
-        """面板失去焦点：未锁定时关闭（点击别处 / 按 Alt+Tab 等）。"""
+        """面板失去焦点：未锁定时延迟关闭（点击别处 / 按 Alt+Tab 等）。
+
+        修复「点击表情分区页签也会关闭面板」：打开瞬间的焦点归还、以及
+        焦点在面板内部控件间转移（点页签/锁定按钮）产生的 FocusOut 都是
+        抖动，不关闭；真正失焦到外部时才延迟 120ms 关闭，且定时器可取消，
+        焦点回到面板 / 面板内交互时立即取消。"""
         if getattr(self, "_emoji_locked", False):
             return
         try:
-            # 短暂延迟，避免焦点在面板内控件间转移时误关
-            self.root.after(120, self._close_emoji_panel)
+            # 刚打开瞬间（focus_force + 焦点归还）的 FocusOut 是系统焦点抖动，忽略
+            if time.time() - getattr(self, "_emoji_opened_at", 0.0) < 0.8:
+                return
+            # 焦点仍在面板内部（点击页签、锁定按钮等）不算「点到外部」
+            foc = self.root.focus_get()
+            if foc is not None:
+                w = foc
+                win = getattr(self, "_emoji_win", None)
+                while w is not None:
+                    if win is not None and w is win:
+                        return
+                    w = getattr(w, "master", None)
+            self._cancel_emoji_focus_after()
+            self._emoji_focus_after = self.root.after(120, self._close_emoji_panel)
         except Exception:
             pass
+
+    def _on_emoji_focus_in(self, event=None):
+        """焦点回到面板：取消待执行的关闭（点页签/点表情后焦点弹回时）。"""
+        self._cancel_emoji_focus_after()
+
+    def _cancel_emoji_focus_after(self):
+        if getattr(self, "_emoji_focus_after", None) is not None:
+            try:
+                self.root.after_cancel(self._emoji_focus_after)
+            except Exception:
+                pass
+            self._emoji_focus_after = None
 
     def _draw_emoji_group(self, gi):
         """在 Canvas 上绘制当前分组的表情。优化：
@@ -5991,6 +6025,7 @@ class ChatApp:
 
     def _toggle_emoji_lock(self):
         """锁定/解锁表情面板：锁定时连续点多个表情不自动关闭。"""
+        self._cancel_emoji_focus_after()
         self._emoji_locked = not getattr(self, "_emoji_locked", False)
         try:
             btn = getattr(self, "_emoji_lock_btn", None)
@@ -6021,6 +6056,7 @@ class ChatApp:
             pass
 
     def _close_emoji_panel(self):
+        self._cancel_emoji_focus_after()
         self._emoji_hidden = True
         win = getattr(self, "_emoji_win", None)
         if win is not None:
@@ -6039,6 +6075,7 @@ class ChatApp:
     def _switch_emoji_group(self, gi):
         """切换表情分类页签：仅重绘 Canvas 文本，毫秒级。"""
         try:
+            self._cancel_emoji_focus_after()  # 点页签是面板内交互，绝不关闭面板
             self._emoji_group_idx = gi
             self._draw_emoji_group(gi)
             for i, tb in enumerate(getattr(self, "_emoji_tab_btns", []) or []):
@@ -6051,6 +6088,7 @@ class ChatApp:
             pass
 
     def _insert_emoji(self, em):
+        self._cancel_emoji_focus_after()
         try:
             if self._hint_active:
                 self.input_box.delete("1.0", "end")

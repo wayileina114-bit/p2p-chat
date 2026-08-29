@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -630,6 +630,23 @@ def _name_color(name):
 
 
 _URL_RE = None
+
+
+def _extract_search_snippet(text, query, width=28):
+    """提取搜索命中的上下文片段（关键词前后各截取干字符），未命中返回空。"""
+    try:
+        q = str(query or "").strip().lower()
+        t = str(text or "")
+        if not q or q not in t.lower():
+            return ""
+        idx = t.lower().index(q)
+        start = max(0, idx - width)
+        end = min(len(t), idx + len(q) + width)
+        pre = "…" if start > 0 else ""
+        post = "…" if end < len(t) else ""
+        return pre + t[start:end] + post
+    except Exception:
+        return ""
 
 
 def _extract_urls(text):
@@ -3476,12 +3493,32 @@ class ChatApp:
 
     @staticmethod
     def _pick_asset_url(data):
-        """从 GitHub release 数据里挑出安装包（P2PChat-Setup.exe）的下载地址。"""
+        """从 GitHub release 数据里挑出安装包（P2PChat-Setup.exe）的下载地址。
+
+        优先精确匹配 setup exe；没有则退而求其次取任意
+        .exe 资产；再没有则用 html 推导直链（releases/download/）。
+        """
         try:
-            for a in (data.get("assets") or []):
+            assets = data.get("assets") or []
+            for a in assets:
                 n = str(a.get("name", "")).lower()
                 if n.endswith(".exe") and "setup" in n:
-                    return str(a.get("browser_download_url", ""))
+                    u = str(a.get("browser_download_url", "")).strip()
+                    if u:
+                        return u
+            for a in assets:
+                n = str(a.get("name", "")).lower()
+                if n.endswith(".exe"):
+                    u = str(a.get("browser_download_url", "")).strip()
+                    if u:
+                        return u
+            # 推导直链：html_url 中的 releases/tag/{tag} -> releases/download/{tag}/P2PChat-Setup.exe
+            html = str(data.get("html_url", "") or "")
+            if "/releases/tag/" in html:
+                tag = html.rsplit("/", 1)[-1].strip()
+                if tag:
+                    return (f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}"
+                            f"/releases/download/{tag}/P2PChat-Setup.exe")
         except Exception:
             pass
         return ""
@@ -6025,6 +6062,16 @@ class ChatApp:
                 link.pack(anchor="w", padx=12, pady=(0, 6))
                 link.bind("<Button-1>", lambda e, u=u: _open_url(u))
                 link.bind("<Button-3>", lambda e, t=u: self._message_menu(e, t, None, mine=mine, mid=mid, name=name))
+        # 搜索命中片段高亮：显示关键词上下文，一眼看到命中位置
+        if search_hl and self._search_query:
+            _snip = _extract_search_snippet(text, self._search_query)
+            if _snip:
+                snip_lbl = ctk.CTkLabel(
+                    bubble, text="🔍 " + _snip, wraplength=460, justify="left",
+                    font=(FONT, 10, "bold"),
+                    fg_color=C("search_hl"), corner_radius=6,
+                    text_color=C("warn_text"))
+                snip_lbl.pack(anchor="w", padx=12, pady=(0, 6))
         if file_path:
             # QQ 式：点击文件消息直接打开/下载
             def _open_file(_e, p=file_path):
@@ -7100,15 +7147,29 @@ class VersionManagerDialog:
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("版本管理 / 更新")
-        top.geometry("480x540")
+        top.geometry("500x580")
         top.resizable(False, False)
         top.transient(master)
+        try:
+            top.pack_propagate(False)  # 锁定固定尺寸，避免内容撑破底部按钮
+        except Exception:
+            pass
         top.configure(fg_color=C("app_bg"))
         top.bind("<Escape>", lambda e: top.destroy())
         try:
             top.grab_set()
         except Exception:
             pass
+
+        # 按钮行最先 pack(side=bottom)：按钮永远底部可见，内容填充剩余
+        btnrow = ctk.CTkFrame(top, fg_color="transparent")
+        btnrow.pack(side="bottom", fill="x", padx=18, pady=(8, 16))
+        self.dl_btn = ctk.CTkButton(btnrow, text="下载并安装", height=36, corner_radius=10,
+                                    font=(FONT, 12, "bold"), command=self._do_download)
+        self.dl_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkButton(btnrow, text="关闭", width=90, height=36, corner_radius=10,
+                      fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
+                      font=(FONT, 12), command=top.destroy).pack(side="right")
 
         ctk.CTkLabel(top, text="版本管理", font=(FONT, 15, "bold"),
                      text_color=C("text")).pack(pady=(14, 2))
@@ -7122,18 +7183,10 @@ class VersionManagerDialog:
         self._build_list()
 
         self.body_box = ctk.CTkTextbox(top, corner_radius=10, fg_color=C("panel_2"),
-                                       text_color=C("text_2"), font=(FONT, 11), wrap="word")
+                                       text_color=C("text_2"), font=(FONT, 11), wrap="word",
+                                       height=200)
         self.body_box.pack(fill="both", expand=True, padx=18, pady=8)
         self._render_body()
-
-        btnrow = ctk.CTkFrame(top, fg_color="transparent")
-        btnrow.pack(fill="x", padx=18, pady=(0, 16))
-        self.dl_btn = ctk.CTkButton(btnrow, text="下载并安装", height=36, corner_radius=10,
-                                    font=(FONT, 12, "bold"), command=self._do_download)
-        self.dl_btn.pack(side="left", fill="x", expand=True, padx=(0, 8))
-        ctk.CTkButton(btnrow, text="关闭", width=90, height=36, corner_radius=10,
-                      fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
-                      font=(FONT, 12), command=top.destroy).pack(side="right")
 
     def _build_list(self):
         for v in self.versions:
@@ -7196,6 +7249,13 @@ class VersionManagerDialog:
         if not v:
             return
         if not v.get("dl"):
+            # 安装包直链缺失：尝试用标签推导直链，不再直接跳 GitHub
+            dl = self._derive_download_url(v.get("tag", ""), v.get("html", ""))
+            if dl:
+                self.top.destroy()
+                if self.download_cb:
+                    self.download_cb(dl)
+                return
             import webbrowser
             webbrowser.open(v.get("html") or
                             f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}/releases")
@@ -7204,6 +7264,21 @@ class VersionManagerDialog:
         if self.download_cb:
             self.download_cb(v["dl"])
 
+    @staticmethod
+    def _derive_download_url(tag, html_url=""):
+        """用标签推导安装包直链（应对资产列表缺失/解析失败）。"""
+        try:
+            t = str(tag or "").strip()
+            if not t:
+                if "/releases/tag/" in str(html_url or ""):
+                    t = str(html_url).rsplit("/", 1)[-1].strip()
+            if t:
+                return (f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}"
+                        f"/releases/download/{t}/P2PChat-Setup.exe")
+        except Exception:
+            pass
+        return ""
+
 class UpdateDialog:
     """发现新版本时的提示框：展示版本号 / 更新内容 / 跳转下载。"""
 
@@ -7211,9 +7286,13 @@ class UpdateDialog:
         top = ctk.CTkToplevel(master)
         self.top = top
         top.title("发现新版本")
-        top.geometry("480x480")
+        top.geometry("500x560")
         top.resizable(False, False)
         top.transient(master)
+        try:
+            top.pack_propagate(False)
+        except Exception:
+            pass
         top.configure(fg_color=C("app_bg"))
         top.bind("<Escape>", lambda e: top.destroy())
         try:
@@ -7239,13 +7318,13 @@ class UpdateDialog:
         text = body.strip() if body else "（本次更新未附详细说明）"
         body_box = ctk.CTkTextbox(body_frame, corner_radius=10, fg_color=C("panel_2"),
                                   text_color=C("text_2"), font=(FONT, 12), wrap="word",
-                                  border_width=0)
-        body_box.pack(fill="both", expand=True, padx=16, pady=(0, 6))
+                                  border_width=0, height=240)
+        body_box.pack(fill="x", padx=16, pady=(0, 6))
         body_box.insert("1.0", text)
         body_box.configure(state="disabled")
 
         btnrow = ctk.CTkFrame(top, fg_color="transparent")
-        btnrow.pack(fill="x", padx=24, pady=(0, 24))
+        btnrow.pack(side="bottom", fill="x", padx=24, pady=(0, 24))
         web_url = notes or f"https://github.com/{UPDATE_OWNER}/{UPDATE_REPO}/releases"
 
         def _do_download():

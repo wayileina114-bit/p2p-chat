@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -6789,18 +6789,20 @@ class ChatApp:
                 clip = None
             if clip is None:
                 return None
-            # 图片文件路径列表：发送第一个图片
+            # 图片文件路径列表：发送全部图片（QQ 式批量粘贴）
             if isinstance(clip, (list, tuple)) and clip:
-                p0 = str(clip[0])
-                if os.path.isfile(p0) and _is_image_path(p0):
+                imgs = [str(x) for x in clip if os.path.isfile(str(x)) and _is_image_path(str(x))]
+                if imgs:
                     if not (self.backend and self.backend.online):
                         self._show_system("尚未连接，无法发送。")
                         return "break"
-                    self._do_send_file(p0)
+                    for _p in imgs:
+                        self._do_send_file(_p)
                     try:
                         self.input_box.focus_set()
                     except Exception:
                         pass
+                    self._set_status(f"已发送 {len(imgs)} 张图片", "ok")
                     return "break"
                 return None  # 文件非图片：走默认粘贴路径
             if isinstance(clip, Image.Image):
@@ -6814,6 +6816,7 @@ class ChatApp:
                         clip = clip.convert("RGB")
                     clip.save(path, "PNG")
                     self._do_send_file(path)
+                    self._set_status("已粘贴并发送图片", "ok")
                 except Exception:
                     pass
                 return "break"
@@ -7310,6 +7313,10 @@ class ChatApp:
                 cv.bind("<Button-1>", self._on_emoji_canvas_click)
                 cv.bind("<Motion>", self._on_emoji_canvas_hover)
                 cv.bind("<Leave>", lambda e: cv.delete("emojihl"))
+                # 滚轮在表情区上下滚动 = 切换分类（微信式快捷换页）
+                cv.bind("<MouseWheel>", self._on_emoji_wheel)
+                cv.bind("<Button-4>", self._on_emoji_wheel)
+                cv.bind("<Button-5>", self._on_emoji_wheel)
                 self._emoji_items = []  # (em, x, y)
                 self._emoji_drawn = -1  # 已绘制分组标记（-1 = 未绘制）
                 self._draw_emoji_titlebar()
@@ -7563,7 +7570,14 @@ class ChatApp:
             h = tcv.winfo_height()
             if h <= 1:
                 h = getattr(self, "_emoji_head_h", 30)
-            tcv.create_text(10, h // 2, text="✿ 表情（点击外部关闭）",
+            try:
+                _gi = getattr(self, "_emoji_group_idx", 0)
+                _groups = getattr(self, "_emoji_groups", None) or EMOJI_GROUPS
+                _gn = _groups[_gi]["label"] if 0 <= _gi < len(_groups) else ""
+                _title = f"✿ 表情 · {_gn}" if _gn else "✿ 表情"
+            except Exception:
+                _title = "✿ 表情"
+            tcv.create_text(10, h // 2, text=_title + "（点击外部关闭 / 滚轮换页）",
                             font=self._emoji_title_font, fill=C("text_mute"), anchor="w")
             # 底部品牌装饰线（与主窗口顶栏色条呼应）
             tcv.create_rectangle(0, h - 2, w, h, fill=C("accent"), outline="", width=0)
@@ -7645,6 +7659,23 @@ class ChatApp:
         except Exception:
             pass
 
+    def _on_emoji_wheel(self, event):
+        """表情区滚轮：切换分组（向上=上一个，向下=下一个）。"""
+        try:
+            n = len(getattr(self, "_emoji_groups", None) or EMOJI_GROUPS)
+            delta = getattr(event, "delta", 0)
+            step = 1 if delta < 0 or getattr(event, "num", 0) == 5 else -1
+            gi = (getattr(self, "_emoji_group_idx", 0) + step) % n
+            self._switch_emoji_group(gi)
+        except Exception:
+            pass
+
+    def _refresh_emoji_title(self):
+        try:
+            self._draw_emoji_titlebar()
+        except Exception:
+            pass
+
     def _switch_emoji_group(self, gi):
         """切换表情分类页签：仅重绘 Canvas 文本，毫秒级。"""
         try:
@@ -7652,6 +7683,7 @@ class ChatApp:
             self._emoji_group_idx = gi
             self._draw_emoji_tabs()
             self._draw_emoji_group(gi)
+            self._refresh_emoji_title()
         except Exception:
             pass
 

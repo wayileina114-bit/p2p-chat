@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3629,6 +3629,9 @@ class ChatApp:
         self.voice_btn.pack(pady=1)
         self.voice_btn.bind("<ButtonPress-1>", lambda e: self._start_voice())
         self.voice_btn.bind("<ButtonRelease-1>", lambda e: self._stop_voice())
+        self.voice_btn.bind("<Button-3>", lambda e: self._cancel_voice_recording())
+        self.voice_btn.bind("<Enter>", lambda e: self._set_status("按住 🎤 说话，松开发送（过短自动取消）", "mute"))
+        self.voice_btn.bind("<Leave>", lambda e: self._restore_status())
 
         # 输入框（聚焦时显示主题色发光边框，QQ/Discord 式反馈）
         self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=1,
@@ -6995,6 +6998,30 @@ class ChatApp:
         else:
             self._set_status("录音太短，已取消", "mute")
 
+    def _cancel_voice_recording(self):
+        """录音中右键取消：停止录音并丢弃（不发送）。"""
+        if not getattr(self, "_voice_recording", False):
+            return
+        self._voice_recording = False
+        try:
+            self._voice_stop_evt.set()
+        except Exception:
+            pass
+        try:
+            self.voice_btn.configure(text="🎤", fg_color=C("input_bg"))
+        except Exception:
+            pass
+        try:
+            self._voice_thread.join(timeout=1.5)
+        except Exception:
+            pass
+        try:
+            if os.path.isfile(self._voice_tmp):
+                os.remove(self._voice_tmp)
+        except Exception:
+            pass
+        self._set_status("已取消录音", "mute")
+
     def _toggle_emoji_panel(self):
         """打开/关闭表情面板。所有 460 个表情用单个 Canvas 绘制（create_text），
         控件数从 460 降到 1，首次打开 <0.2s；切页只重绘文本，瞬间完成。"""
@@ -7435,6 +7462,11 @@ class ChatApp:
             self.input_box.focus_set()
         except Exception:
             pass
+        # 插入后同步发送按钮状态（有内容点亮）
+        try:
+            self._update_send_btn_state()
+        except Exception:
+            pass
         # 记录最近使用（存设置，最多 24 个）
         try:
             rec = list(_load_settings().get("recent_emojis", []) or [])
@@ -7453,8 +7485,8 @@ class ChatApp:
             paths = self.root.tk.splitlist(event.data)
         except Exception:
             return
-        for p in paths:
-            p = p.strip()
+        for p in paths or []:
+            p = str(p or "").strip()
             if p and os.path.isfile(p):
                 self._do_send_file(p)
         return "break"

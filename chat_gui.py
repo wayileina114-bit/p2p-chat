@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -239,6 +239,22 @@ THEMES = {
 }
 
 _APPEARANCE = "dark"
+_ACCENT_OVERRIDE = None   # 用户自定义强调色（hex）；None = 用主题默认色
+
+
+def _shade_hex(hex_color, factor):
+    """把 hex 颜色加深（factor<1）/提亮（factor>1），用于派生 hover 色。"""
+    try:
+        c = str(hex_color or "").strip().lstrip("#")
+        if len(c) == 3:
+            c = "".join(ch * 2 for ch in c)
+        if len(c) != 6:
+            return hex_color
+        rgb = tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+        rgb = tuple(max(0, min(255, int(round(v * factor)))) for v in rgb)
+        return "#%02x%02x%02x" % rgb
+    except Exception:
+        return hex_color
 
 
 def R(n):
@@ -300,8 +316,11 @@ def _detect_system_theme():
 
 
 def C(key):
-    """取当前主题色；未知 key 回退主文字色，避免界面崩溃。"""
+    """取当前主题色；未知 key 回退主文字色，避免界面崩溃。
+    自定义强调色（_ACCENT_OVERRIDE）覆盖 accent / accent_hover。"""
     pal = THEMES.get(_APPEARANCE, THEMES["dark"])
+    if _ACCENT_OVERRIDE and key in ("accent", "accent_hover"):
+        return _ACCENT_OVERRIDE if key == "accent" else _shade_hex(_ACCENT_OVERRIDE, 0.82)
     return pal.get(key, pal.get("text", "#ffffff"))
 
 
@@ -3017,6 +3036,8 @@ class ChatApp:
         self._avatar = avatar
         self._bio = bio
         self.appearance = _APPEARANCE
+        global _ACCENT_OVERRIDE
+        _ACCENT_OVERRIDE = str(_load_settings().get("accent_override", "") or "").strip() or None
         self._appearance_mode = str(_load_settings().get("appearance_mode", "system") or "system").strip()
         if self._appearance_mode == "system":
             self.appearance = _detect_system_theme()
@@ -3026,6 +3047,7 @@ class ChatApp:
         self._peers = {}            # cid -> {"name":.., "rooms":[..]}
         self._rooms = []            # 已加入房间（有序）
         self._sessions = {}         # key -> 会话（群聊 + 私聊）
+        self._mid_index = {}         # key -> {mid: msg} 消息索引（右键/跳转/回执 O(1) 反查，免线性扫描）
         self._current = None
         self._images = []
         self._pending_offers = {}
@@ -3077,6 +3099,11 @@ class ChatApp:
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
         self.enter_sends = bool(_load_settings().get("enter_sends", True))
+        # 聊天字号（设置中心可调：小 12 / 中 13 / 大 15，持久化）
+        try:
+            self._chat_font_size = max(10, min(20, int(_load_settings().get("chat_font_size", 13) or 13)))
+        except Exception:
+            self._chat_font_size = 13
         self._history_expanded = False  # 是否已展开“更早消息”
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
         self.notify_popup = bool(_load_settings().get("notify_popup", True))
@@ -3534,7 +3561,7 @@ class ChatApp:
         # 输入框
         self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=0,
                                         fg_color=C("input_bg"), text_color=C("text_mute"),
-                                        font=(FONT, 12), wrap="word")
+                                        font=(FONT, max(11, self._chat_font_size - 1)), wrap="word")
         self._input_focused = False
         self.input_box.pack(side="left", fill="both", expand=True, padx=(6, 10), pady=10)
         self.input_box.insert("1.0", HINT)
@@ -3654,6 +3681,48 @@ class ChatApp:
         except Exception:
             pass
 
+    def _apply_chat_font_size(self, size):
+        """应用消息字号：持久化 + 更新输入框字体 + 重渲染当前会话。"""
+        try:
+            self._chat_font_size = max(10, min(20, int(size)))
+            _update_settings("chat_font_size", self._chat_font_size)
+            try:
+                self.input_box.configure(font=(FONT, max(11, self._chat_font_size - 1)))
+            except Exception:
+                pass
+            self._apply_session_list()
+            self._render_feed()
+            self._set_status(f"消息字号已设为 {self._chat_font_size}px", "ok")
+        except Exception:
+            pass
+
+    def _pick_accent_color(self):
+        """自定义强调色：颜色选择器选色 → 持久化 → 重建界面。"""
+        global _ACCENT_OVERRIDE
+        try:
+            from tkinter import colorchooser
+            cur = _ACCENT_OVERRIDE or C("accent")
+            rgb, hexv = colorchooser.askcolor(color=cur, title="选择主题强调色")
+            if not hexv:
+                return
+            _ACCENT_OVERRIDE = str(hexv).strip()
+            _update_settings("accent_override", _ACCENT_OVERRIDE)
+            self._rebuild_ui()
+            self._set_status(f"主题色已设为 {_ACCENT_OVERRIDE}", "ok")
+        except Exception:
+            pass
+
+    def _reset_accent_color(self):
+        """恢复主题默认强调色。"""
+        try:
+            global _ACCENT_OVERRIDE
+            _ACCENT_OVERRIDE = None
+            _update_settings("accent_override", "")
+            self._rebuild_ui()
+            self._set_status("已恢复默认主题色", "ok")
+        except Exception:
+            pass
+
     def _apply_broker_setting(self, broker_var, port_var):
         """应用自定义服务器设置（自建局域网 broker 可大幅提速）。"""
         b = broker_var.get().strip()
@@ -3693,6 +3762,31 @@ class ChatApp:
                 selected_color=C("accent"), selected_hover_color=C("accent_hover"),
                 unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
                 command=self._apply_appearance_mode).pack(fill="x", padx=26, pady=(2, 4))
+
+            # 自定义强调色（QQ/Discord 式主题色定制，持久化）
+            accent_row = ctk.CTkFrame(win, fg_color="transparent")
+            accent_row.pack(fill="x", padx=26, pady=(6, 0))
+            ctk.CTkButton(accent_row, text="🎨 自定义主题色…", width=130, height=26, corner_radius=8,
+                          fg_color=(_ACCENT_OVERRIDE or C("accent")),
+                          text_color=("#ffffff" if _ACCENT_OVERRIDE else "#ffffff"),
+                          hover_color=C("accent_hover"), font=(FONT, 10),
+                          command=self._pick_accent_color).pack(side="left")
+            ctk.CTkButton(accent_row, text="恢复默认", width=76, height=26, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 10),
+                          command=self._reset_accent_color).pack(side="left", padx=(6, 0))
+
+            # 消息字号（小/中/大，持久化；改动立即重渲染当前会话）
+            ctk.CTkLabel(win, text="消息字号", font=(FONT, 10),
+                         text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(6, 0))
+            _fs_var = ctk.StringVar(value={12: "小", 13: "中", 15: "大"}.get(self._chat_font_size, "中"))
+            ctk.CTkSegmentedButton(
+                win, values=["小", "中", "大"], variable=_fs_var,
+                font=(FONT, 11), height=28,
+                selected_color=C("accent"), selected_hover_color=C("accent_hover"),
+                unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
+                command=lambda v: self._apply_chat_font_size(
+                    {"小": 12, "中": 13, "大": 15}.get(v, 13))).pack(fill="x", padx=26, pady=(2, 4))
 
             # 开机自启动（Windows 注册表 Run 键）
             autostart_var = tk.BooleanVar(value=self._is_autostart())
@@ -4825,14 +4919,87 @@ class ChatApp:
             return None
 
     def _bind_row_hover(self, row, selected):
+        """会话行悬停高亮（平滑渐变，QQ/Discord 式；选中行不变色）。"""
+        if selected:
+            return
+        _anim = {"after": None, "step": 0, "steps": 0}
+
+        def _cancel():
+            if _anim["after"] is not None:
+                try:
+                    row.after_cancel(_anim["after"])
+                except Exception:
+                    pass
+                _anim["after"] = None
+
+        def _hex_mix(a, b, t):
+            """两 hex 色线性插值；支持 transparent 特判。"""
+            def _p(c):
+                c = str(c).strip()
+                if not c or c.lower() in ("transparent", "none", ""):
+                    return None
+                try:
+                    c = c.lstrip("#")
+                    if len(c) == 3:
+                        c = "".join(ch * 2 for ch in c)
+                    return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+                except Exception:
+                    return None
+            pa, pb = _p(a), _p(b)
+            if pa is None and pb is None:
+                return "transparent"
+            if pa is None:
+                pa = (0, 0, 0)
+            if pb is None:
+                pb = (0, 0, 0)
+            t = max(0.0, min(1.0, t))
+            rgb = tuple(int(round(pa[i] + (pb[i] - pa[i]) * t)) for i in range(3))
+            return "#%02x%02x%02x" % rgb
+
+        def _start(step, target):
+            _cancel()
+            _anim["steps"] = 8
+            _anim["step"] = step
+
+            def _tick():
+                _anim["after"] = None
+                s = _anim["step"]
+                if s > _anim["steps"]:
+                    try:
+                        row.configure(fg_color=target)
+                    except Exception:
+                        pass
+                    return
+                t = s / float(_anim["steps"])
+                try:
+                    cur = row.cget("fg_color")
+                except Exception:
+                    cur = "transparent"
+                try:
+                    row.configure(fg_color=_hex_mix(cur, target, 0.35))
+                except Exception:
+                    pass
+                _anim["step"] = s + 1
+                try:
+                    _anim["after"] = row.after(16, _tick)
+                except Exception:
+                    _anim["after"] = None
+
+            _tick()
+
         def on_enter(_e):
-            if not selected:
-                row.configure(fg_color=C("hover"))
+            if row.winfo_exists():
+                _start(1, C("hover"))
+
         def on_leave(_e):
-            if not selected:
+            _cancel()
+            try:
                 row.configure(fg_color="transparent")
-        row.bind("<Enter>", on_enter)
-        row.bind("<Leave>", on_leave)
+            except Exception:
+                pass
+
+        row.bind("<Enter>", on_enter, add="+")
+        row.bind("<Leave>", on_leave, add="+")
 
     def _session_preview(self, s):
         """返回会话最后一条消息的单行预览（QQ/Discord 风格）。"""
@@ -4889,7 +5056,7 @@ class ChatApp:
         nrow.pack(fill="x")
         ctk.CTkLabel(nrow, text=room_label + (f"  {n}" if n else ""), anchor="w",
                      text_color=(C("selected_text") if selected else C("text")),
-                     font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2").pack(side="left")
+                     font=(FONT, max(11, self._chat_font_size - 1), "bold" if selected else "normal"), cursor="hand2").pack(side="left")
         stime = self._session_time(s) if s else ""
         if stime:
             ctk.CTkLabel(nrow, text=stime, anchor="e",
@@ -4899,7 +5066,7 @@ class ChatApp:
                          font=(FONT, 10), cursor="hand2").pack(side="right", padx=(0, 6))
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
-                         font=(FONT, 10), cursor="hand2").pack(anchor="w")
+                         font=(FONT, max(9, self._chat_font_size - 3)), cursor="hand2").pack(anchor="w")
         if unread:
             self._unread_badge(row, unread).pack(side="right", padx=(0, 6))
         if s and s.get("@me"):
@@ -4931,7 +5098,7 @@ class ChatApp:
         nrow.pack(fill="x")
         ctk.CTkLabel(nrow, text=(("🔕 " + s["name"]) if self._is_muted(key) else s["name"]), anchor="w",
                      text_color=(C("selected_text") if selected else C("text")),
-                     font=(FONT, 12, "bold" if (selected or unread) else "normal"),
+                     font=(FONT, max(11, self._chat_font_size - 1), "bold" if (selected or unread) else "normal"),
                      cursor="hand2").pack(side="left")
         stime = self._session_time(s)
         if stime:
@@ -4939,7 +5106,7 @@ class ChatApp:
                          text_color=C("text_mute"), font=(FONT, 9)).pack(side="right")
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
-                         font=(FONT, 10), cursor="hand2").pack(anchor="w")
+                         font=(FONT, max(9, self._chat_font_size - 3)), cursor="hand2").pack(anchor="w")
         if (s.get("draft") or "").strip():
             ctk.CTkLabel(row, text="📝", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(side="right", padx=(0, 4))
@@ -5071,7 +5238,14 @@ class ChatApp:
             msg["voice"] = True
         s["messages"].append(msg)
         if len(s["messages"]) > self.FEED_MAX:
+            # 被挤掉的旧消息同步移出索引（避免索引无限膨胀）
+            for _rm in s["messages"][:-self.FEED_MAX]:
+                _rid = _rm.get("mid")
+                if _rid:
+                    self._mid_index.get(key, {}).pop(str(_rid), None)
             s["messages"] = s["messages"][-self.FEED_MAX:]
+        if mid:
+            self._mid_index.setdefault(key, {})[str(mid)] = msg
         self._schedule_session_save(s)
         self._maybe_notify(s, name, text, mine, system)
         if not mine and not system and self._mentions_me(text):
@@ -5108,6 +5282,45 @@ class ChatApp:
             self._update_window_title()
             if not mine and not self._dnd and s.get("key") not in self._muted:
                 self._flash_window()
+
+    def _rebuild_mid_index(self, s):
+        """整表重建某会话的 mid 索引（历史重载 / 恢复后调用）。"""
+        try:
+            key = s.get("key")
+            if key is None:
+                return
+            idx = {}
+            for m in s.get("messages", []):
+                mid = m.get("mid")
+                if mid:
+                    idx[str(mid)] = m
+            if idx:
+                self._mid_index[key] = idx
+            else:
+                self._mid_index.pop(key, None)
+        except Exception:
+            pass
+
+    def _find_msg(self, key, mid):
+        """按 mid 反查消息（索引 O(1)，miss 时线性回退并回填索引）。"""
+        if mid is None:
+            return None
+        try:
+            m = self._mid_index.get(key, {}).get(str(mid))
+            if m is not None:
+                return m
+        except Exception:
+            pass
+        s = self._sessions.get(key)
+        if s is not None:
+            for m in s.get("messages", []):
+                if m.get("mid") == mid:
+                    try:
+                        self._mid_index.setdefault(key, {})[str(mid)] = m
+                    except Exception:
+                        pass
+                    return m
+        return None
 
     def _schedule_session_save(self, s):
         """消息追加节流保存：100ms 内多次追加只合并写一次盘（
@@ -5596,6 +5809,7 @@ class ChatApp:
                                    "确定清空当前会话的全部聊天记录吗？此操作不可撤销。"):
             return
         s["messages"] = []
+        self._mid_index.pop(self._current, None)
         s["unread"] = 0
         if s["kind"] == "group":
             _delete_group_history(s["room"])
@@ -5927,6 +6141,7 @@ class ChatApp:
             return
         for s in self._sessions.values():
             s["messages"] = []
+            self._mid_index.pop(s.get("key"), None)
             s["unread"] = 0
             if s["kind"] == "group":
                 _delete_group_history(s["room"])
@@ -5945,6 +6160,7 @@ class ChatApp:
             return
         _delete_dm_history(s["cid"])
         self._sessions.pop(key, None)
+        self._mid_index.pop(key, None)
         if self._current == key:
             if self._rooms:
                 self._switch_to(self._group_key(self._rooms[0]))
@@ -6030,6 +6246,7 @@ class ChatApp:
         for room in self._rooms:
             s = self._ensure_group_session(room)
             s["messages"] = _load_group_history(room, self.FEED_MAX)
+            self._rebuild_mid_index(s)
 
         self.backend = MqttBackend(
             name, self.cid, self.broker, self.port,
@@ -6992,9 +7209,18 @@ class ChatApp:
             return
         try:
             s = self._sessions.get(key)
-            base = s["name"] if s else "聊天"
-            prefix = "私聊 · " if (s and s["kind"] == "dm") else "群聊 · "
-            self.chat_title.configure(text=f"{prefix}{base} · {name} 正在输入…")
+            # 主标题保持与 _update_chat_title 一致的风格（群聊 🌸 前缀 / 私聊纯名），
+            # “正在输入”显示在副标题，避免覆盖在线状态与群前缀
+            if s is None:
+                self.chat_title.configure(text="聊天")
+            elif s["kind"] == "group":
+                self.chat_title.configure(text=f"🌸 {s['name']}")
+            else:
+                self.chat_title.configure(text=s["name"])
+            try:
+                self.chat_sub.configure(text=f"{name} 正在输入…", text_color=C("accent"))
+            except Exception:
+                pass
             if self._typing_after is not None:
                 try:
                     self.root.after_cancel(self._typing_after)
@@ -7078,9 +7304,7 @@ class ChatApp:
             self._schedule_feed_refresh()  # 兜底：气泡不在缓存里，整页刷新
             return
         s = self._sessions.get(self._current)
-        m = None
-        if s:
-            m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+        m = self._find_msg(self._current, mid) if s else None
         if m is None:
             self._schedule_feed_refresh()
             return
@@ -7114,20 +7338,19 @@ class ChatApp:
         s = self._sessions.get(key)
         if s is None:
             return
-        for m in s["messages"]:
-            if m.get("mid") == mid:
-                react = m.setdefault("reactions", {})
-                bucket = react.setdefault(emoji, {})
-                if cid in bucket:
-                    bucket.pop(cid, None)
-                    if not bucket:
-                        react.pop(emoji, None)
-                else:
-                    bucket[cid] = name or "匿名"
-                self._save_session(s)
-                if key == self._current:
-                    self._refresh_message_badge(mid)
-                return
+        m = self._find_msg(key, mid)
+        if m is not None:
+            react = m.setdefault("reactions", {})
+            bucket = react.setdefault(emoji, {})
+            if cid in bucket:
+                bucket.pop(cid, None)
+                if not bucket:
+                    react.pop(emoji, None)
+            else:
+                bucket[cid] = name or "匿名"
+            self._save_session(s)
+            if key == self._current:
+                self._refresh_message_badge(mid)
 
     def _do_reaction(self, mid, emoji):
         """本地切换我的表情回应并广播。"""
@@ -7137,7 +7360,7 @@ class ChatApp:
         s = self._sessions.get(self._current)
         if s is None:
             return
-        m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+        m = self._find_msg(self._current, mid)
         if m is None:
             return
         is_dm = s.get("kind") == "dm"
@@ -7166,14 +7389,13 @@ class ChatApp:
         s = self._sessions.get(key)
         if s is None:
             return
-        for m in s["messages"]:
-            if m.get("mid") == mid:
-                m["text"] = str(text)[:MAX_TEXT]
-                m["edited"] = True
-                self._save_session(s)
-                if key == self._current:
-                    self._refresh_message_badge(mid)
-                return
+        m = self._find_msg(key, mid)
+        if m is not None:
+            m["text"] = str(text)[:MAX_TEXT]
+            m["edited"] = True
+            self._save_session(s)
+            if key == self._current:
+                self._refresh_message_badge(mid)
 
     def _do_edit(self, mid, new_text):
         """提交一次消息编辑（本地立即更新 + 广播）。"""
@@ -7188,11 +7410,7 @@ class ChatApp:
         if s is None:
             return
         # 限时校验：仅自己的消息且发送 5 分钟内可编辑
-        _tgt = None
-        for m in s.get("messages", []):
-            if m.get("mid") == mid:
-                _tgt = m
-                break
+        _tgt = self._find_msg(self._current, mid)
         if _tgt is None or not _tgt.get("mine"):
             self._set_status("只能编辑自己发送的消息", "err")
             return
@@ -7206,12 +7424,11 @@ class ChatApp:
         is_dm = s.get("kind") == "dm"
         target = s.get("cid") if is_dm else s.get("room")
         if self.backend.send_edit(target, mid, new_text, is_dm):
-            for m in s.get("messages", []):
-                if m.get("mid") == mid:
-                    m["text"] = new_text
-                    m["edited"] = True
-                    self._save_session(s)
-                    break
+            _em = self._find_msg(self._current, mid)
+            if _em is not None:
+                _em["text"] = new_text
+                _em["edited"] = True
+                self._save_session(s)
             self._render_feed()
             self._set_status("已编辑", "ok")
         else:
@@ -7228,15 +7445,14 @@ class ChatApp:
         s = self._sessions.get(key)
         if s is None:
             return
-        for m in s["messages"]:
-            if m.get("mid") == mid and m.get("mine"):
-                names = m.setdefault("delivered_by", [])
-                if name and name not in names:
-                    names.append(name)
-                self._save_session(s)
-                if key == self._current:
-                    self._refresh_message_badge(mid)
-                return
+        m = self._find_msg(key, mid)
+        if m is not None and m.get("mine"):
+            names = m.setdefault("delivered_by", [])
+            if name and name not in names:
+                names.append(name)
+            self._save_session(s)
+            if key == self._current:
+                self._refresh_message_badge(mid)
 
     def _receive_read(self, room, mid, cid, name):
         """收到已读回执：给对应消息标记谁已读。"""
@@ -7249,15 +7465,14 @@ class ChatApp:
         s = self._sessions.get(key)
         if s is None:
             return
-        for m in s["messages"]:
-            if m.get("mid") == mid and m.get("mine"):
-                names = m.setdefault("read_by", [])
-                if name and name not in names:
-                    names.append(name)
-                self._save_session(s)
-                if key == self._current:
-                    self._refresh_message_badge(mid)
-                return
+        m = self._find_msg(key, mid)
+        if m is not None and m.get("mine"):
+            names = m.setdefault("read_by", [])
+            if name and name not in names:
+                names.append(name)
+            self._save_session(s)
+            if key == self._current:
+                self._refresh_message_badge(mid)
 
     def _receive_recall(self, room, mid, who):
         """收到撤回指令：把对应消息标记为已撤回。"""
@@ -7270,16 +7485,15 @@ class ChatApp:
         s = self._sessions.get(key)
         if s is None:
             return
-        for m in s["messages"]:
-            if m.get("mid") == mid:
-                if m.get("recalled"):
-                    return
-                m["recalled"] = True
-                m["recalled_by"] = who or "对方"
-                self._save_session(s)
-                if key == self._current:
-                    self._schedule_feed_refresh()
+        m = self._find_msg(key, mid)
+        if m is not None:
+            if m.get("recalled"):
                 return
+            m["recalled"] = True
+            m["recalled_by"] = who or "对方"
+            self._save_session(s)
+            if key == self._current:
+                self._schedule_feed_refresh()
 
     def _do_recall(self, mid):
         """右键撤回自己的消息。"""
@@ -7290,11 +7504,7 @@ class ChatApp:
         if s is None:
             return
         # 限时校验：仅自己的消息且发送 2 分钟内可撤回
-        _tgt = None
-        for m in s.get("messages", []):
-            if m.get("mid") == mid:
-                _tgt = m
-                break
+        _tgt = self._find_msg(self._current, mid)
         if _tgt is None or not _tgt.get("mine"):
             self._set_status("只能撤回自己发送的消息", "err")
             return
@@ -7309,12 +7519,11 @@ class ChatApp:
         target = s.get("cid") if is_dm else s.get("room")
         if self.backend.send_recall(target, mid, is_dm):
             self._set_status("已撤回", "ok")
-            for m in s.get("messages", []):
-                if m.get("mid") == mid:
-                    m["recalled"] = True
-                    m["recalled_by"] = "我"
-                    self._save_session(s)
-                    break
+            _rm = self._find_msg(self._current, mid)
+            if _rm is not None:
+                _rm["recalled"] = True
+                _rm["recalled_by"] = "我"
+                self._save_session(s)
             self._render_feed()
         else:
             self._set_status("撤回失败", "err")
@@ -7804,7 +8013,7 @@ class ChatApp:
         body = ctk.CTkLabel(bubble, text=(str(text)[:320] + "…" if _long else text),
                             wraplength=460, justify="left",
                             text_color=(C("mine_text") if mine else C("other_text")),
-                            font=(FONT, 13))
+                            font=(FONT, self._chat_font_size))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
         if _long:
             ctk.CTkButton(bubble, text="展开全文", width=84, height=22, corner_radius=6,
@@ -7981,7 +8190,7 @@ class ChatApp:
             s = self._sessions.get(self._current)
             if s is None:
                 return
-            m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+            m = self._find_msg(self._current, mid)
             if m is None:
                 return
             win = ctk.CTkToplevel(self.root)
@@ -8551,12 +8760,9 @@ class ChatApp:
             # 反查消息获取时间戳（用于限时判断）
             mts = None
             if mid:
-                s = self._sessions.get(self._current)
-                if s:
-                    for m in s["messages"]:
-                        if m.get("mid") == mid:
-                            mts = m.get("ts")
-                            break
+                _fm = self._find_msg(self._current, mid)
+                if _fm is not None:
+                    mts = _fm.get("ts")
             age = 0.0
             try:
                 if mts:
@@ -8850,7 +9056,7 @@ class ChatApp:
             s = self._sessions.get(self._current)
             if s is None or not mid:
                 return
-            exists = any(m.get("mid") == mid for m in s.get("messages", []))
+            exists = self._find_msg(self._current, mid) is not None
             if not exists:
                 self._set_status("被引用的消息不在当前会话", "err")
                 return

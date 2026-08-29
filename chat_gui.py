@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3074,6 +3074,7 @@ class ChatApp:
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms}
         self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
         self._last_list_fp = None          # 会话列表指纹（无实质变化时跳过重建，减卡顿）
+        self._mention_cache = None        # 可 @ 成员名缓存（当前会话名列表；渲染时避免重复构建）
         self._bubble_frames = {}       # mid -> 气泡容器（用于局部刷新回应，避免整页重渲染）
         self._playing_voice = None    # 当前播放中的语音文件路径
         self._voice_start_ts = 0.0    # 当前播放开始时间戳
@@ -3741,30 +3742,33 @@ class ChatApp:
         try:
             win = ctk.CTkToplevel(self.root)
             win.title("设置")
-            win.geometry("430x700")
-            win.resizable(False, False)
+            win.geometry("440x720")
+            win.resizable(True, True)
+            win.minsize(430, 480)
             try:
                 self._round_toplevel(win)
             except Exception:
                 pass
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="设置中心", font=(FONT, 15, "bold"),
-                         text_color=C("text")).pack(pady=(16, 6))
+                         text_color=C("text")).pack(pady=(12, 6))
+            scroll = ctk.CTkScrollableFrame(win, fg_color="transparent", corner_radius=0)
+            scroll.pack(fill="both", expand=True, padx=0, pady=(0, 0))
 
-            ctk.CTkLabel(win, text="外观", font=(FONT, 11),
+            ctk.CTkLabel(scroll, text="外观", font=(FONT, 11),
                          text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(8, 2))
             _am_lbl = {"system": "跟随系统", "dark": "深色", "light": "浅色",
                        "anime": "二次元"}.get(self._appearance_mode, "跟随系统")
             _mode_var = ctk.StringVar(value=_am_lbl)
             ctk.CTkSegmentedButton(
-                win, values=["跟随系统", "深色", "浅色", "二次元"], variable=_mode_var,
+                scroll, values=["跟随系统", "深色", "浅色", "二次元"], variable=_mode_var,
                 font=(FONT, 11), height=30,
                 selected_color=C("accent"), selected_hover_color=C("accent_hover"),
                 unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
                 command=self._apply_appearance_mode).pack(fill="x", padx=26, pady=(2, 4))
 
             # 自定义强调色（QQ/Discord 式主题色定制，持久化）
-            accent_row = ctk.CTkFrame(win, fg_color="transparent")
+            accent_row = ctk.CTkFrame(scroll, fg_color="transparent")
             accent_row.pack(fill="x", padx=26, pady=(6, 0))
             ctk.CTkButton(accent_row, text="🎨 自定义主题色…", width=130, height=26, corner_radius=8,
                           fg_color=(_ACCENT_OVERRIDE or C("accent")),
@@ -3777,11 +3781,11 @@ class ChatApp:
                           command=self._reset_accent_color).pack(side="left", padx=(6, 0))
 
             # 消息字号（小/中/大，持久化；改动立即重渲染当前会话）
-            ctk.CTkLabel(win, text="消息字号", font=(FONT, 10),
+            ctk.CTkLabel(scroll, text="消息字号", font=(FONT, 10),
                          text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(6, 0))
             _fs_var = ctk.StringVar(value={12: "小", 13: "中", 15: "大"}.get(self._chat_font_size, "中"))
             ctk.CTkSegmentedButton(
-                win, values=["小", "中", "大"], variable=_fs_var,
+                scroll, values=["小", "中", "大"], variable=_fs_var,
                 font=(FONT, 11), height=28,
                 selected_color=C("accent"), selected_hover_color=C("accent_hover"),
                 unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
@@ -3790,52 +3794,52 @@ class ChatApp:
 
             # 开机自启动（Windows 注册表 Run 键）
             autostart_var = tk.BooleanVar(value=self._is_autostart())
-            ctk.CTkCheckBox(win, text="开机自动启动", variable=autostart_var,
+            ctk.CTkCheckBox(scroll, text="开机自动启动", variable=autostart_var,
                             command=lambda: self._set_autostart(autostart_var.get()),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
 
             popup_var = tk.BooleanVar(value=self.notify_popup)
-            ctk.CTkCheckBox(win, text="Windows 通知弹窗", variable=popup_var,
+            ctk.CTkCheckBox(scroll, text="Windows 通知弹窗", variable=popup_var,
                             command=lambda: self._apply_setting("notify_popup", popup_var, "notify_popup"),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
             sound_var = tk.BooleanVar(value=self.notify_sound)
-            ctk.CTkCheckBox(win, text="新消息提示音", variable=sound_var,
+            ctk.CTkCheckBox(scroll, text="新消息提示音", variable=sound_var,
                             command=lambda: self._apply_setting("notify_sound", sound_var, "notify_sound"),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
             auto_var = tk.BooleanVar(value=self.auto_connect)
-            ctk.CTkCheckBox(win, text="启动时自动连接", variable=auto_var,
+            ctk.CTkCheckBox(scroll, text="启动时自动连接", variable=auto_var,
                             command=lambda: self._apply_setting("auto_connect", auto_var, "auto_connect"),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
             enter_var = tk.BooleanVar(value=self.enter_sends)
-            ctk.CTkCheckBox(win, text="回车键发送（关闭后为 QQ 风格 Ctrl+回车发送、回车换行）", variable=enter_var,
+            ctk.CTkCheckBox(scroll, text="回车键发送（关闭后为 QQ 风格 Ctrl+回车发送、回车换行）", variable=enter_var,
                             command=lambda: self._apply_setting("enter_sends", enter_var, "enter_sends"),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
             dnd_var = tk.BooleanVar(value=self._dnd)
-            ctk.CTkCheckBox(win, text="免打扰（静音通知+提示音）", variable=dnd_var,
+            ctk.CTkCheckBox(scroll, text="免打扰（静音通知+提示音）", variable=dnd_var,
                             command=lambda: self._apply_setting_dnd(dnd_var),
                             font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
 
-            ctk.CTkLabel(win, text="服务器（同一局域网可自建 broker 提速）",
+            ctk.CTkLabel(scroll, text="服务器（同一局域网可自建 broker 提速）",
                          font=(FONT, 10), text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(10, 0))
             broker_var = ctk.StringVar(value=self.broker)
-            ctk.CTkEntry(win, textvariable=broker_var, width=240, height=30, corner_radius=8,
+            ctk.CTkEntry(scroll, textvariable=broker_var, width=240, height=30, corner_radius=8,
                          border_width=0, fg_color=C("input_bg"), text_color=C("text"),
                          placeholder_text="服务器地址（如 192.168.1.10）", font=(FONT, 11)).pack(pady=4)
             port_var = ctk.StringVar(value=str(self.port))
-            ctk.CTkEntry(win, textvariable=port_var, width=120, height=30, corner_radius=8,
+            ctk.CTkEntry(scroll, textvariable=port_var, width=120, height=30, corner_radius=8,
                          border_width=0, fg_color=C("input_bg"), text_color=C("text"),
                          placeholder_text="端口", font=(FONT, 11)).pack(pady=2)
-            ctk.CTkButton(win, text="应用服务器设置", width=140, height=28, corner_radius=8,
+            ctk.CTkButton(scroll, text="应用服务器设置", width=140, height=28, corner_radius=8,
                           fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
                           font=(FONT, 11),
                           command=lambda: self._apply_broker_setting(broker_var, port_var)).pack(pady=4)
 
-            ctk.CTkButton(win, text="端到端加密口令…", height=32, corner_radius=8,
+            ctk.CTkButton(scroll, text="端到端加密口令…", height=32, corner_radius=8,
                           fg_color=C("input_bg"), text_color=C("text"), hover_color=C("input_hover"),
                           font=(FONT, 12), command=self._set_encrypt_pass).pack(fill="x", padx=26, pady=6)
 
             # 更多功能（原菜单栏入口，Web 端风格整合到设置中心）
-            ctk.CTkLabel(win, text="更多功能", font=(FONT, 11),
+            ctk.CTkLabel(scroll, text="更多功能", font=(FONT, 11),
                          text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(12, 2))
             for _txt, _cmd in (
                 ("📤 导出当前会话记录（TXT）", self._export_current_history),
@@ -3846,12 +3850,12 @@ class ChatApp:
                 ("📶 网络测速…", self._measure_network),
                 ("🔄 检查更新", self._manual_check_update),
             ):
-                ctk.CTkButton(win, text=_txt, height=28, corner_radius=8,
+                ctk.CTkButton(scroll, text=_txt, height=28, corner_radius=8,
                               fg_color=C("input_bg"), text_color=C("text_2"),
                               hover_color=C("input_hover"), font=(FONT, 11),
                               command=_cmd).pack(fill="x", padx=26, pady=1)
 
-            ctk.CTkLabel(win, text=f"P2P 聊天 · v{APP_VERSION}", font=(FONT, 10),
+            ctk.CTkLabel(scroll, text=f"P2P 聊天 · v{APP_VERSION}", font=(FONT, 10),
                          text_color=C("text_mute")).pack(pady=(10, 14))
             win.bind("<Escape>", lambda e: win.destroy())
         except Exception:
@@ -6402,7 +6406,20 @@ class ChatApp:
         return None
 
     def _mention_names(self):
-        """可 @ 的成员：当前房间在线成员 + 在线名单（去重）。"""
+        """可 @ 的成员：当前房间在线成员 + 在线名单（去重）。
+
+        缓存按当前会话 key 缓存：渲染一屏消息时 _extract_mentions 对每条消息
+        都会调用本方法，重复构建同一份名字列表是纯浪费（批量渲染 200 条时
+        差异明显）。切换会话 / 成员变化 / 昵称变化时失效重算。"""
+        tag = None
+        try:
+            s = self._sessions.get(self._current)
+            room = s.get("room") if s else None
+            tag = (self._current, room, tuple(sorted(str(p.get("name", "")) for p in self._peers.values())))
+            if self._mention_cache and self._mention_cache[0] == tag:
+                return self._mention_cache[1]
+        except Exception:
+            pass
         names = []
         seen = set()
         s = self._sessions.get(self._current)
@@ -6419,6 +6436,10 @@ class ChatApp:
             if n and n not in seen:
                 names.append(n)
                 seen.add(n)
+        try:
+            self._mention_cache = (tag, names)
+        except Exception:
+            pass
         return names
 
     def _autosize_input(self):
@@ -6576,7 +6597,8 @@ class ChatApp:
         btn = self._voice_btns.get(path)
         if btn is not None:
             try:
-                btn.configure(text="⏹ 停止")
+                btn.configure(text="⏹ 停止", fg_color=C("accent"),
+                              hover_color=C("accent_hover"), text_color="#ffffff")
             except Exception:
                 pass
         spd = _VOICE_SPEED[self._voice_speeds.get(path, 0)]
@@ -6611,7 +6633,9 @@ class ChatApp:
             try:
                 dur = self._voice_durs.get(path) or 0
                 dur_txt = f"{dur:.0f}″" if dur > 0 else ""
-                btn.configure(text=f"🎤 语音 {dur_txt}")
+                btn.configure(text=f"🎤 语音 {dur_txt}",
+                              fg_color=C("input_bg"),
+                              hover_color=C("input_hover"), text_color=C("text"))
             except Exception:
                 pass
 
@@ -8285,10 +8309,13 @@ class ChatApp:
             self._hover_bar = bar
             self._hover_mid = mid
             is_mine = bool(self._body_labels.get(mid)) and self._is_mine_bubble(mid)
-            for t, cmd in (("👍", lambda: self._hover_react(mid)),
-                           ("↩", lambda: self._hover_reply(name, text, mid)),
-                           ("⧉", lambda: self._hover_forward(mid)),
-                           ("📋", lambda: self._hover_copy(text))):
+            btns = [("👍", lambda: self._hover_react(mid)),
+                    ("↩", lambda: self._hover_reply(name, text, mid)),
+                    ("⧉", lambda: self._hover_forward(mid)),
+                    ("📋", lambda: self._hover_copy(text))]
+            if (text or "").strip():
+                btns.insert(3, ("🔊", lambda: self._hover_speak(text)))
+            for t, cmd in btns:
                 b = ctk.CTkButton(bar, text=t, width=30, height=24, corner_radius=6,
                                   fg_color="transparent", hover_color=C("hover"),
                                   text_color=C("text"), font=(FONT, 12), command=cmd)
@@ -8310,7 +8337,7 @@ class ChatApp:
         try:
             s = self._sessions.get(self._current)
             if s:
-                m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+                m = self._find_msg(self._current, mid)
                 if m is not None:
                     return bool(m.get("mine"))
         except Exception:
@@ -8376,6 +8403,10 @@ class ChatApp:
     def _hover_copy(self, text):
         self._destroy_hover_bar()
         self._copy_to_clipboard(text)
+
+    def _hover_speak(self, text):
+        self._destroy_hover_bar()
+        self._speak_text(text)
 
     def _mentions_me(self, text):
         """判断消息正文是否 @ 了我（用于高亮）。"""
@@ -8776,6 +8807,8 @@ class ChatApp:
             menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="复制为引用", command=lambda: self._copy_as_quote(name, text))
+            if (text or "").strip():
+                menu.add_command(label="🔊 朗读", command=lambda: self._speak_text(text))
             if mid:
                 menu.add_command(label="复制消息链接",
                                  command=lambda: self._copy_msg_link(mid))

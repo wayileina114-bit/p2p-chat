@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.3.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.3.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3033,6 +3033,11 @@ class ChatApp:
                                          fg_color=C("input_bg"), text_color=C("text_2"),
                                          hover_color=C("input_hover"), command=self._toggle_members)
         self.members_btn.pack(side="right")
+        self.readall_btn = ctk.CTkButton(self.title_row, text="✔ 全部已读", width=82, height=26,
+                                         corner_radius=8, font=(FONT, 11),
+                                         fg_color=C("input_bg"), text_color=C("text_2"),
+                                         hover_color=C("input_hover"), command=self._mark_all_read)
+        self.readall_btn.pack(side="right", padx=(0, 6))
 
         # 成员列表面板（默认隐藏，点「👥 成员」开关）
         self.members_frame = ctk.CTkFrame(right, corner_radius=8, fg_color=C("panel"))
@@ -3046,6 +3051,16 @@ class ChatApp:
         self.search_entry.pack(side="left", fill="x", expand=True, padx=(16, 6))
         self.search_entry.bind("<KeyRelease>", self._on_search_change)
         self.search_entry.bind("<Escape>", lambda e: self._close_search())
+        self.search_entry.bind("<Return>", lambda e: self._jump_search_hit(1))
+        self.search_entry.bind("<Shift-Return>", lambda e: self._jump_search_hit(-1))
+        ctk.CTkButton(self.search_frame, text="▲", width=28, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), text_color=C("text_2"),
+                      hover_color=C("input_hover"), font=(FONT, 10),
+                      command=lambda: self._jump_search_hit(-1)).pack(side="left", padx=(0, 4))
+        ctk.CTkButton(self.search_frame, text="▼", width=28, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), text_color=C("text_2"),
+                      hover_color=C("input_hover"), font=(FONT, 10),
+                      command=lambda: self._jump_search_hit(1)).pack(side="left", padx=(0, 4))
         ctk.CTkButton(self.search_frame, text="✕", width=28, height=28, corner_radius=8,
                       fg_color=C("input_bg"), text_color=C("text_2"),
                       hover_color=C("input_hover"), font=(FONT, 12),
@@ -3097,6 +3112,15 @@ class ChatApp:
         # Ctrl+F 打开会话内消息搜索
         self.root.bind("<Control-f>", self._open_search)
         self.root.bind("<Control-F>", self._open_search)
+        # 全局快捷键：Ctrl+Shift+F 全局搜索 / Ctrl+N 发起私聊 / Ctrl+R 重连 / Alt+↑↓ 切换会话
+        self.root.bind("<Control-Shift-F>", self._open_global_search)
+        self.root.bind("<Control-Shift-f>", self._open_global_search)
+        self.root.bind("<Control-n>", self._shortcut_new_dm)
+        self.root.bind("<Control-N>", self._shortcut_new_dm)
+        self.root.bind("<Control-r>", self._shortcut_reconnect)
+        self.root.bind("<Control-R>", self._shortcut_reconnect)
+        self.root.bind("<Alt-Up>", lambda e: self._switch_session_dir(-1))
+        self.root.bind("<Alt-Down>", lambda e: self._switch_session_dir(1))
         # 焦点跟踪：后台/最小化时收到新消息弹 Windows 通知
         self.root.bind("<FocusIn>", lambda e: setattr(self, "_window_focused", True))
         self.root.bind("<FocusOut>", lambda e: setattr(self, "_window_focused", False))
@@ -4334,9 +4358,9 @@ class ChatApp:
             else:
                 show_head = self._should_show_head(s["messages"], len(s["messages"]) - 1)
                 if voice and file_path and os.path.isfile(file_path):
-                    self._add_voice_bubble(name, file_path, mine, msg.get("ts"), show_head)
+                    self._add_voice_bubble(name, file_path, mine, msg.get("ts"), show_head, mid=mid)
                 elif img_path and os.path.isfile(img_path):
-                    self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head)
+                    self._add_image_bubble(name, img_path, mine, msg.get("ts"), show_head, mid=mid)
                 else:
                     self._add_bubble(name, text, mine, msg.get("ts"), show_head,
                                      file_path=file_path, mid=mid)
@@ -4782,7 +4806,157 @@ class ChatApp:
         if q == self._search_query:
             return
         self._search_query = q
+        # 记录命中列表，供 Enter / ▲▼ 上下跳转
+        hits = []
+        s = self._sessions.get(self._current)
+        if q and s:
+            hits = [m.get("mid") for m in s.get("messages", [])
+                    if m.get("mid") and self._msg_matches_search(m, q)]
+        self._search_hits = hits
+        self._search_hit_idx = -1
         self._render_feed()
+
+    def _msg_matches_search(self, m, q):
+        """判断消息是否命中搜索关键词（正文 / 发送者 / 文件名）。"""
+        q = (q or "").lower()
+        if not q:
+            return False
+        try:
+            return (q in str(m.get("text", "")).lower()
+                    or q in str(m.get("name", "")).lower()
+                    or (m.get("file_path") and q in os.path.basename(str(m["file_path"])).lower()))
+        except Exception:
+            return False
+
+    def _jump_search_hit(self, delta):
+        """在搜索命中之间跳转（Enter=下一处，Shift+Enter=上一处）。"""
+        try:
+            hits = getattr(self, "_search_hits", None) or []
+            if not hits:
+                self._set_status("当前搜索没有命中", "mute")
+                return
+            idx = getattr(self, "_search_hit_idx", -1)
+            idx = (idx + delta) % len(hits)
+            self._search_hit_idx = idx
+            self._scroll_to_mid(hits[idx])
+            self._set_status(f"搜索命中 {idx + 1}/{len(hits)} · Enter 下一处", "accent")
+        except Exception:
+            pass
+
+    def _open_global_search(self, event=None):
+        """全局搜索（Ctrl+Shift+F）：跨所有会话搜关键词，列出命中会话与条数，点击跳转。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("全局搜索")
+            win.geometry("440x500")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="🔍 全局搜索", font=(FONT, 14, "bold"),
+                         text_color=C("text")).pack(pady=(14, 2))
+            entry = ctk.CTkEntry(win, placeholder_text="搜索所有会话的消息（回车搜索）…",
+                                 height=32, corner_radius=8, font=(FONT, 12),
+                                 fg_color=C("input_bg"), text_color=C("text"), border_width=0)
+            entry.pack(fill="x", padx=18, pady=(4, 6))
+            results = ctk.CTkScrollableFrame(win, fg_color="transparent")
+            results.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+            hint = ctk.CTkLabel(results, text="输入关键词后按回车搜索",
+                                text_color=C("text_mute"), font=(FONT, 11))
+            hint.pack(pady=16)
+
+            def _do_search(_e=None):
+                q = entry.get().strip()
+                for w in results.winfo_children():
+                    w.destroy()
+                if not q:
+                    ctk.CTkLabel(results, text="输入关键词后按回车搜索",
+                                 text_color=C("text_mute"), font=(FONT, 11)).pack(pady=16)
+                    return
+                total = 0
+                for key, s in self._sessions.items():
+                    if s.get("kind") not in ("group", "dm"):
+                        continue
+                    n = sum(1 for m in s.get("messages", []) if self._msg_matches_search(m, q))
+                    if n <= 0:
+                        continue
+                    total += n
+                    nm = s.get("name") or key
+                    row = ctk.CTkButton(
+                        results, text=f"{nm} · {n} 条", height=34, corner_radius=8,
+                        anchor="w", fg_color=C("input_bg"), text_color=C("text"),
+                        hover_color=C("input_hover"), font=(FONT, 12),
+                        command=lambda k=key, qq=q: self._jump_global_result(win, k, qq))
+                    row.pack(fill="x", pady=2)
+                if total == 0:
+                    ctk.CTkLabel(results, text="没有找到匹配的消息",
+                                 text_color=C("text_mute"), font=(FONT, 11)).pack(pady=16)
+                else:
+                    ctk.CTkLabel(results, text=f"共 {total} 条命中 · 点击会话跳转",
+                                 text_color=C("accent"), font=(FONT, 10, "bold")).pack(pady=(4, 0))
+
+            entry.bind("<Return>", _do_search)
+            win.bind("<Escape>", lambda e: win.destroy())
+            entry.focus_set()
+        except Exception:
+            pass
+
+    def _jump_global_result(self, win, key, q):
+        """全局搜索跳转：切到目标会话并复用会话内搜索高亮。"""
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        try:
+            self._switch_to(key)
+            self._open_search()
+            self.search_entry.delete(0, "end")
+            self.search_entry.insert(0, q)
+            self._apply_search()
+            self._set_status(f"已跳转到「{key}」：搜索「{q}」", "ok")
+        except Exception:
+            pass
+
+    def _shortcut_new_dm(self, event=None):
+        self._open_dm_dialog()
+        return "break"
+
+    def _shortcut_reconnect(self, event=None):
+        try:
+            self._set_status("正在重新连接…", "mute")
+            self._ensure_connected()
+        except Exception:
+            pass
+        return "break"
+
+    def _switch_session_dir(self, delta):
+        """Alt+↑/↓ 在会话间切换（循环）。"""
+        try:
+            keys = list(self._sessions.keys())
+            if not keys:
+                return
+            try:
+                idx = keys.index(self._current)
+            except Exception:
+                idx = 0
+            nxt = keys[(idx + delta) % len(keys)]
+            self._switch_to(nxt)
+        except Exception:
+            pass
+
+    def _mark_all_read(self):
+        """全部已读：一键清零所有会话未读数（任务栏角标同步消失）。"""
+        try:
+            n = 0
+            for s in self._sessions.values():
+                if s.get("unread"):
+                    s["unread"] = 0
+                    n += 1
+                s["@me"] = False
+            self._last_list_fp = None
+            self._apply_session_list()
+            self._update_window_title()
+            self._set_status("已全部标为已读" if n else "当前没有未读消息", "ok")
+        except Exception:
+            pass
 
     def _clear_all_history(self):
         if not self._sessions:
@@ -6416,6 +6590,13 @@ class ChatApp:
             for w in (bubble, body):
                 w.bind("<Button-1>", _open_file)
                 w.configure(cursor="hand2")
+            # 一键打开所在文件夹（免右键）
+            frow = ctk.CTkFrame(bubble, fg_color="transparent")
+            frow.pack(anchor="w", padx=12, pady=(0, 6))
+            ctk.CTkButton(frow, text="📂 打开文件夹", width=96, height=24, corner_radius=6,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 10),
+                          command=lambda p=file_path: self._open_file_location(p)).pack(side="left")
         if ts:
             ft = _fmt_full_time(ts)
             def _enter(_e, ft=ft): self._set_status(f"{name} · {ft}", "mute")
@@ -6727,10 +6908,12 @@ class ChatApp:
             return False
         return f"@{my}" in str(text)
 
-    def _add_voice_bubble(self, name, path, mine, ts=None, show_head=True):
+    def _add_voice_bubble(self, name, path, mine, ts=None, show_head=True, mid=None):
         """渲染语音消息气泡：显示时长，点击播放。"""
         tstr = _fmt_time(ts) if ts else ""
         bubble = self._message_row(name, mine, show_head)
+        if mid:
+            self._bubble_frames[mid] = bubble
         if show_head:
             head = ctk.CTkFrame(bubble, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(6, 0))
@@ -6776,18 +6959,37 @@ class ChatApp:
         bar.pack_forget()  # 默认隐藏，播放时才显示
         self._voice_bars[path] = bar
         self._voice_durs[path] = dur
+        if mid:
+            vtxt = f"🎤 语音：{os.path.basename(path)}"
+            self._bind_hover(mid, bubble, vbox, self._voice_btns[path], spd_btn,
+                             name=name, text=vtxt)
         self._maybe_scroll_bottom()
         self._trim_feed()
 
-    def _add_image_bubble(self, name, path, mine, ts=None, show_head=True):
+    def _bind_hover(self, mid, *ws, name="", text=""):
+        """给一批控件绑定悬停快捷浮层 Enter/Leave（add="+" 与既有绑定共存）。"""
+        if not ws:
+            return
+        b0 = ws[0]
+        for w in ws:
+            try:
+                w.bind("<Enter>", lambda e, m=mid, b=b0, n=name, t=text:
+                       self._hover_enter(m, b, n, t), add="+")
+                w.bind("<Leave>", lambda e, m=mid: self._hover_leave(m), add="+")
+            except Exception:
+                pass
+
+    def _add_image_bubble(self, name, path, mine, ts=None, show_head=True, mid=None):
         tstr = _fmt_time(ts) if ts else ""
         if not (_HAS_PIL and path and os.path.isfile(path)):
-            self._add_bubble(name, "🖼 一张图片", mine, ts, show_head)
+            self._add_bubble(name, "🖼 一张图片", mine, ts, show_head, mid=mid)
             return
         try:
             cache_key = (path, int(os.path.getmtime(path)))
             ctk_img = self._thumb_cache.get(cache_key)
             bubble = self._message_row(name, mine, show_head)
+            if mid:
+                self._bubble_frames[mid] = bubble
             if show_head:
                 head = ctk.CTkFrame(bubble, fg_color="transparent")
                 head.pack(fill="x", padx=12, pady=(6, 2))
@@ -6796,23 +6998,26 @@ class ChatApp:
                 if tstr:
                     ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
                                  font=(FONT, 9)).pack(side="right")
+            itxt = f"🖼 图片：{os.path.basename(path)}"
             if ctk_img is not None:
                 self._images.append(ctk_img)
-                self._pack_image_label(bubble, ctk_img, path)
+                self._pack_image_label(bubble, ctk_img, path, mid=mid, name=name, itxt=itxt)
             else:
                 # 后台解码缩略图，UI 线程先显示占位（图片多时不卡界面）
                 ph = ctk.CTkLabel(bubble, text="🖼 加载中…", width=140, height=96,
                                   fg_color=C("input_bg"), text_color=C("text_mute"),
                                   font=(FONT, 11))
                 ph.pack(padx=6, pady=4)
+                if mid:
+                    self._bind_hover(mid, bubble, ph, name=name, text=itxt)
                 threading.Thread(target=self._decode_thumb_worker,
-                                 args=(path, cache_key, bubble, ph), daemon=True).start()
+                                 args=(path, cache_key, bubble, ph, mid, name, itxt), daemon=True).start()
             self._maybe_scroll_bottom()
             self._trim_feed()
         except Exception:
-            self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts)
+            self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts, mid=mid)
 
-    def _decode_thumb_worker(self, path, cache_key, bubble, ph):
+    def _decode_thumb_worker(self, path, cache_key, bubble, ph, mid=None, name="", itxt=""):
         """后台线程解码缩略图（PIL 解码不进 UI 线程）。"""
         img = None
         try:
@@ -6832,11 +7037,12 @@ class ChatApp:
         except Exception:
             img = None
         try:
-            self.root.after(0, lambda: self._apply_image_thumb(bubble, ph, cache_key, img, path))
+            self.root.after(0, lambda: self._apply_image_thumb(
+                bubble, ph, cache_key, img, path, mid=mid, name=name, itxt=itxt))
         except Exception:
             pass
 
-    def _apply_image_thumb(self, bubble, ph, cache_key, img, path):
+    def _apply_image_thumb(self, bubble, ph, cache_key, img, path, mid=None, name="", itxt=""):
         """主线程：解码完成后把占位替换为图片。"""
         try:
             if bubble is None or not bubble.winfo_exists():
@@ -6853,15 +7059,17 @@ class ChatApp:
             if len(self._thumb_cache) > 256:
                 self._thumb_cache.clear()
             self._images.append(ctk_img)
-            self._pack_image_label(bubble, ctk_img, path)
+            self._pack_image_label(bubble, ctk_img, path, mid=mid, name=name, itxt=itxt)
         except Exception:
             pass
 
-    def _pack_image_label(self, bubble, ctk_img, path):
+    def _pack_image_label(self, bubble, ctk_img, path, mid=None, name="", itxt=""):
         _img = ctk.CTkLabel(bubble, image=ctk_img, text="", cursor="hand2")
         _img.pack(padx=6, pady=4)
         _img.bind("<Button-1>", lambda e, p=path: self._open_image(p))
         _img.bind("<Button-3>", lambda e, p=path: self._image_menu(e, p))
+        if mid:
+            self._bind_hover(mid, bubble, _img, name=name, text=itxt)
 
     def _voice_menu(self, event, path):
         """语音消息右键菜单：转发 / 打开位置。"""
@@ -7268,27 +7476,29 @@ class ChatApp:
                 return
             self._history_expanded = True
             self._render_feed()
-            def _do():
-                try:
-                    canvas = self.feed._parent_canvas
-                    canvas.update_idletasks()
-                    canvas.configure(scrollregion=canvas.bbox("all"))
-                    bf = self._bubble_frames.get(mid)
-                    if bf is not None:
-                        y = bf.winfo_y()
-                        total = max(1, canvas.winfo_reqheight())
-                        frac = max(0.0, min(1.0, y / total))
-                        canvas.yview_moveto(frac)
-                        bf.configure(border_width=2, border_color=C("search_hl"))
-                        def _unhl(_b=bf):
-                            try:
-                                _b.configure(border_width=0, border_color=None)
-                            except Exception:
-                                pass
-                        self.root.after(1500, _unhl)
-                except Exception:
-                    pass
-            self.root.after(50, _do)
+            self.root.after(50, lambda m=mid: self._scroll_to_mid(m))
+        except Exception:
+            pass
+
+    def _scroll_to_mid(self, mid):
+        """滚动到指定消息并高亮（引用跳转 / 搜索命中导航共用）。"""
+        try:
+            canvas = self.feed._parent_canvas
+            canvas.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            bf = self._bubble_frames.get(mid)
+            if bf is not None:
+                y = bf.winfo_y()
+                total = max(1, canvas.winfo_reqheight())
+                frac = max(0.0, min(1.0, y / total))
+                canvas.yview_moveto(frac)
+                bf.configure(border_width=2, border_color=C("search_hl"))
+                def _unhl(_b=bf):
+                    try:
+                        _b.configure(border_width=0, border_color=None)
+                    except Exception:
+                        pass
+                self.root.after(1200, _unhl)
         except Exception:
             pass
 
@@ -7427,9 +7637,11 @@ class ChatApp:
             if m.get("system"):
                 self._render_system_line(m.get("text", ""))
             elif m.get("voice") and m.get("file_path") and os.path.isfile(m["file_path"]):
-                self._add_voice_bubble(m["name"], m["file_path"], m["mine"], ts, show_head)
+                self._add_voice_bubble(m["name"], m["file_path"], m["mine"], ts, show_head,
+                                       mid=m.get("mid"))
             elif m.get("img_path") and os.path.isfile(m["img_path"]):
-                self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head)
+                self._add_image_bubble(m["name"], m["img_path"], m["mine"], ts, show_head,
+                                       mid=m.get("mid"))
             else:
                 self._add_bubble(m["name"], m["text"], m["mine"], ts, show_head,
                                  file_path=m.get("file_path"), read_by=m.get("read_by"),

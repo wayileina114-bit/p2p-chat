@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -4727,11 +4727,34 @@ class ChatApp:
             cid_var = ctk.StringVar()
             ctk.CTkEntry(win, textvariable=cid_var, width=260, height=32, corner_radius=8,
                          border_width=0, fg_color=C("input_bg"), text_color=C("text"),
-                         placeholder_text="对方 ID", font=(FONT, 12)).pack(pady=(8, 4))
+                         placeholder_text="对方 ID", font=(FONT, 12)).pack(pady=(8, 2))
             name_var = ctk.StringVar()
             ctk.CTkEntry(win, textvariable=name_var, width=260, height=32, corner_radius=8,
                          border_width=0, fg_color=C("input_bg"), text_color=C("text"),
                          placeholder_text="对方昵称（可选，如 ID 已知可留空）", font=(FONT, 12)).pack(pady=4)
+            # 在线成员快捷选择（点一下自动填入 ID，QQ 式快速开聊）
+            _peers_list = [(cid, p["name"]) for cid, p in self._peers.items()
+                           if cid != self.cid][:6]
+            if _peers_list:
+                chip_row = ctk.CTkFrame(win, fg_color="transparent")
+                chip_row.pack(fill="x", padx=16, pady=(2, 0))
+                ctk.CTkLabel(chip_row, text="在线成员：", text_color=C("text_mute"),
+                             font=(FONT, 9)).pack(side="left")
+                for _cid, _nm in _peers_list:
+                    ctk.CTkButton(chip_row, text=str(_nm)[:6], width=0, height=22, corner_radius=11,
+                                  fg_color=C("input_bg"), text_color=C("text"),
+                                  hover_color=C("accent_hover"), font=(FONT, 9),
+                                  command=lambda c=_cid: _fill(c)).pack(side="left", padx=2)
+
+            def _fill(cid):
+                cid_var.set(cid)
+                try:
+                    p = self._peers.get(cid)
+                    if p and not name_var.get().strip():
+                        name_var.set(str(p.get("name", ""))[:20])
+                except Exception:
+                    pass
+                name_var.icursor("end")
 
             def _go():
                 cid = cid_var.get().strip()
@@ -5606,6 +5629,21 @@ class ChatApp:
                                font=(FONT, 12))
             ent.pack(pady=(12, 6))
             ent.focus_set()
+            # 已有房间快捷加入（chip）
+            if self._rooms:
+                chip_row = ctk.CTkFrame(win, fg_color="transparent")
+                chip_row.pack(fill="x", padx=16, pady=(0, 2))
+                ctk.CTkLabel(chip_row, text="已有房间：", text_color=C("text_mute"),
+                             font=(FONT, 9)).pack(side="left")
+                for _rm in self._rooms[-6:]:
+                    ctk.CTkButton(chip_row, text=str(_rm)[:8], width=0, height=22, corner_radius=11,
+                                  fg_color=C("input_bg"), text_color=C("text"),
+                                  hover_color=C("accent_hover"), font=(FONT, 9),
+                                  command=lambda r=_rm: _go_room(r)).pack(side="left", padx=2)
+
+            def _go_room(room):
+                win.destroy()
+                self._add_room(room)
 
             def _go():
                 room = var.get().strip() or "默认房间"

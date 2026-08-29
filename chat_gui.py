@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -243,6 +243,22 @@ def R(n):
         return int(round(n * scale))
     except Exception:
         return n
+
+
+def _win11_round_corners(hwnd):
+    """Win11：给窗口加系统圆角（DWM 圆角偏好），美化观感；失败静默。"""
+    try:
+        import ctypes
+        if os.name != "nt" or not hwnd:
+            return
+        DWMWA_WINDOW_CORNER_PREFERENCE = 33
+        DWMWCP_ROUND = 2
+        pref = ctypes.c_int(DWMWCP_ROUND)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            ctypes.c_void_p(int(hwnd)), DWMWA_WINDOW_CORNER_PREFERENCE,
+            ctypes.byref(pref), ctypes.sizeof(pref))
+    except Exception:
+        pass
 
 
 def set_appearance(mode, apply_ctk=True):
@@ -3058,6 +3074,7 @@ class ChatApp:
         except Exception:
             self._custom_titlebar = False
         self.root.after(60, self._fix_taskbar_style)  # 窗口映射后修正任务栏样式
+        self.root.after(80, self._round_main_window)  # Win11 系统圆角
 
         self._build_ui()
         self._build_menu()
@@ -3085,6 +3102,24 @@ class ChatApp:
             self.root.after(400, self._auto_connect_on_startup)
 
     # --------------------------- UI 构建 ---------------------------
+
+    def _round_main_window(self):
+        """Win11：主窗口系统圆角。"""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id()) or self.root.winfo_id()
+            _win11_round_corners(hwnd)
+        except Exception:
+            pass
+
+    def _round_toplevel(self, win):
+        """给浮窗（设置/表情/详情等）加 Win11 系统圆角。"""
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(win.winfo_id()) or win.winfo_id()
+            _win11_round_corners(hwnd)
+        except Exception:
+            pass
 
     def _fix_taskbar_style(self):
         """无边框窗口任务栏修正：去 TOOLWINDOW 加 APPWINDOW，让任务栏图标正常显示。"""
@@ -3332,11 +3367,17 @@ class ChatApp:
         right.pack(side="left", fill="both", expand=True)
 
         self.title_row = ctk.CTkFrame(right, fg_color="transparent")
-        self.title_row.pack(fill="x", padx=16, pady=(14, 2))
-        self.chat_title = ctk.CTkLabel(self.title_row, text="群聊", font=(FONT, 13, "bold"),
+        self.title_row.pack(fill="x", padx=16, pady=(12, 2))
+        # 两层标题排版（Web 式）：主标题 15px 粗体 + 副标题 10px 灰
+        tstack = ctk.CTkFrame(self.title_row, fg_color="transparent")
+        tstack.pack(side="left", fill="x", expand=True)
+        self.chat_title = ctk.CTkLabel(tstack, text="群聊", font=(FONT, 15, "bold"),
                                        text_color=C("text"), anchor="w", cursor="hand2")
-        self.chat_title.pack(side="left", fill="x", expand=True)
+        self.chat_title.pack(fill="x")
         self.chat_title.bind("<Double-Button-1>", lambda e: self._copy_current_chat_id())
+        self.chat_sub = ctk.CTkLabel(tstack, text="", font=(FONT, 10),
+                                     text_color=C("text_mute"), anchor="w")
+        self.chat_sub.pack(fill="x")
         self.members_btn = ctk.CTkButton(self.title_row, text="👥", width=32, height=26,
                                          corner_radius=R(8), font=(FONT, 12),
                                          fg_color=C("input_bg"), text_color=C("text_2"),
@@ -3434,6 +3475,7 @@ class ChatApp:
         self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=0,
                                         fg_color=C("input_bg"), text_color=C("text_mute"),
                                         font=(FONT, 12), wrap="word")
+        self._input_focused = False
         self.input_box.pack(side="left", fill="both", expand=True, padx=(6, 10), pady=10)
         self.input_box.insert("1.0", HINT)
         self.input_box.bind("<Return>", self._on_enter)
@@ -3572,6 +3614,10 @@ class ChatApp:
             win.title("设置")
             win.geometry("430x700")
             win.resizable(False, False)
+            try:
+                self._round_toplevel(win)
+            except Exception:
+                pass
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="设置中心", font=(FONT, 15, "bold"),
                          text_color=C("text")).pack(pady=(16, 6))
@@ -4292,6 +4338,10 @@ class ChatApp:
             win.title("发起私聊")
             win.geometry("380x240")
             win.resizable(False, False)
+            try:
+                self._round_toplevel(win)
+            except Exception:
+                pass
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="💌 发起私聊", font=(FONT, 15, "bold"),
                          text_color=C("text")).pack(pady=(18, 4))
@@ -4367,11 +4417,19 @@ class ChatApp:
             return
         if s["kind"] == "group":
             n = sum(1 for p in self._peers.values() if s["room"] in (p.get("rooms") or []))
-            self.chat_title.configure(text=f"🌸 群聊 · {s['name']}（{n}人在线）")
+            self.chat_title.configure(text=f"🌸 {s['name']}")
+            try:
+                self.chat_sub.configure(text=f"群聊 · {n} 人在线")
+            except Exception:
+                pass
         else:
             online = s.get("online") or s.get("cid") in self._peers
-            dot = "🟢" if online else "⚪"
-            self.chat_title.configure(text=f"{dot} 私聊 · {s['name']}")
+            dot = "🟢 在线" if online else "⚪ 离线"
+            self.chat_title.configure(text=s["name"])
+            try:
+                self.chat_sub.configure(text=f"私聊 · {dot}")
+            except Exception:
+                pass
 
     def _title_more_menu(self):
         """标题行 ⋯ 更多菜单：全部已读 / 消息筛选。"""
@@ -4898,8 +4956,19 @@ class ChatApp:
             self.input_box.delete("1.0", "end")
             self.input_box.configure(text_color=C("text"))
             self._hint_active = False
+        # 聚焦高亮：工具钮与发送钮点亮（Web 式反馈）
+        try:
+            self.emoji_btn.configure(fg_color=C("selected_bg"))
+            self.send_btn.configure(fg_color=C("accent_hover"))
+        except Exception:
+            pass
 
     def _on_input_focus_out(self, event):
+        try:
+            self.emoji_btn.configure(fg_color=C("input_bg"))
+            self.send_btn.configure(fg_color=C("accent"))
+        except Exception:
+            pass
         if not self.input_box.get("1.0", "end").strip():
             self._reset_input_hint()
 
@@ -4912,6 +4981,10 @@ class ChatApp:
             win.title("加入房间")
             win.geometry("360x200")
             win.resizable(False, False)
+            try:
+                self._round_toplevel(win)
+            except Exception:
+                pass
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="➕ 加入房间", font=(FONT, 14, "bold"),
                          text_color=C("text")).pack(pady=(16, 4))
@@ -5411,6 +5484,10 @@ class ChatApp:
             win.title("全局搜索")
             win.geometry("440x500")
             win.resizable(False, False)
+            try:
+                self._round_toplevel(win)
+            except Exception:
+                pass
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="🔍 全局搜索", font=(FONT, 14, "bold"),
                          text_color=C("text")).pack(pady=(14, 2))
@@ -5549,6 +5626,10 @@ class ChatApp:
             win.title("@我 的消息")
             win.geometry("400x460")
             win.resizable(False, False)
+            try:
+                self._round_toplevel(win)
+            except Exception:
+                pass
             win.attributes("-topmost", True)
             if not items:
                 ctk.CTkLabel(win, text="（还没有人 @ 你）", text_color=C("text_mute"),
@@ -6127,6 +6208,10 @@ class ChatApp:
                 win.overrideredirect(True)
                 win.configure(bg=C("panel"))
                 win.attributes("-topmost", True)
+                try:
+                    self._round_toplevel(win)  # Win11 圆角
+                except Exception:
+                    pass
                 self._emoji_group_idx = 0
                 self._emoji_locked = False
                 self._emoji_font = getattr(self, "_emoji_font", None) or ("Segoe UI Emoji", 15)

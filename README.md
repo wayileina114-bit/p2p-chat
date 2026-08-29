@@ -2,7 +2,7 @@
 
 跨公网即时通信，**无需服务器、无需公网 IP、免注册**。走免费公共 MQTT 中转，开箱即用。
 
-> 最新版本：**v3.5.3** · 安装包见 [GitHub Releases](https://github.com/wayileina114-bit/p2p-chat/releases)
+> 最新版本：**v3.5.4** · 安装包见 [GitHub Releases](https://github.com/wayileina114-bit/p2p-chat/releases)
 
 ---
 

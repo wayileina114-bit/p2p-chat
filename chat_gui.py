@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3069,8 +3069,8 @@ class ChatApp:
         self._typing_last = 0.0        # 上次发送“正在输入”广播的时间戳（节流用）
         self._members_visible = False  # 成员列表面板是否展开
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
-        self._dnd = False              # 免打扰（静音通知+提示音）
-        self._ghost = False             # 隐身模式（不广播在线状态，仍可收发消息）
+        self._dnd = bool(_load_settings().get("dnd", False))       # 免打扰（静音通知+提示音，持久化）
+        self._ghost = bool(_load_settings().get("ghost", False))   # 隐身模式（不广播在线状态，仍可收发消息，持久化）
         self._pin_var = tk.BooleanVar(value=bool(_load_settings().get("pin_window", False)))  # 窗口置顶
         self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms}
@@ -3954,7 +3954,8 @@ class ChatApp:
                           font=(FONT, 11),
                           command=lambda: self._apply_broker_setting(broker_var, port_var)).pack(pady=4)
 
-            ctk.CTkButton(scroll, text="端到端加密口令…", height=32, corner_radius=8,
+            _enc_txt = ("🔒 修改加密口令…" if self.encrypt_pass else "🔓 设置加密口令…")
+            ctk.CTkButton(scroll, text=_enc_txt, height=32, corner_radius=8,
                           fg_color=C("input_bg"), text_color=C("text"), hover_color=C("input_hover"),
                           font=(FONT, 12), command=self._set_encrypt_pass).pack(fill="x", padx=26, pady=6)
 
@@ -4079,17 +4080,20 @@ class ChatApp:
             pass
 
     def _toggle_dnd(self):
-        """免打扰开关：一键静音通知 + 提示音。"""
+        """免打扰开关：一键静音通知 + 提示音（状态持久化）。"""
         self._dnd = not self._dnd
+        _update_settings("dnd", self._dnd)
         try:
-            self.dnd_btn.configure(text="🔕" if self._dnd else "🔔")
+            self.dnd_btn.configure(text="🔕" if self._dnd else "🔔",
+                                   fg_color=(C("accent") if self._dnd else C("input_bg")))
         except Exception:
             pass
         self._set_status("已开启免打扰" if self._dnd else "已关闭免打扰", "ok")
 
     def _toggle_ghost(self):
-        """隐身模式开关：不广播在线状态（对方看到你离线），但仍可收发消息。"""
+        """隐身模式开关：不广播在线状态（对方看到你离线），但仍可收发消息（状态持久化）。"""
         self._ghost = not self._ghost
+        _update_settings("ghost", self._ghost)
         try:
             if self.backend:
                 self.backend.hidden = self._ghost

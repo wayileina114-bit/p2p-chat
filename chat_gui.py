@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3085,6 +3085,8 @@ class ChatApp:
         self._voice_speeds = {}       # 语音路径 -> 倍速档位索引
         self._voice_spd_btns = {}     # 语音路径 -> 倍速按钮
         self._voice_tick_job = None   # 进度刷新的 after 任务 id
+        self._playing_btn = None      # 当前播放语音的按钮（同路径多条消息时不串控件）
+        self._playing_bar = None      # 当前播放语音的进度条
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
         self._body_labels = {}         # mid -> 正文 label（局部更新编辑）
@@ -3106,6 +3108,11 @@ class ChatApp:
             self._chat_font_size = max(10, min(20, int(_load_settings().get("chat_font_size", 13) or 13)))
         except Exception:
             self._chat_font_size = 13
+        # 聊天背景："" 默认 / "deep" 深邃 / "sakura" 樱花（持久化）
+        try:
+            self._chat_bg = str(_load_settings().get("chat_bg", "") or "")
+        except Exception:
+            self._chat_bg = ""
         self._history_expanded = False  # 是否已展开“更早消息”
         self.notify_sound = bool(_load_settings().get("notify_sound", True))
         self.notify_popup = bool(_load_settings().get("notify_popup", True))
@@ -3135,6 +3142,7 @@ class ChatApp:
         except Exception:
             self._custom_titlebar = False
         self.root.after(60, self._fix_taskbar_style)  # 窗口映射后修正任务栏样式
+        self.root.after(400, self._fix_taskbar_style)  # 样式可能被系统延迟重置，多刷一次
         self.root.after(80, self._round_main_window)  # Win11 系统圆角
 
         self._build_ui()
@@ -3183,7 +3191,12 @@ class ChatApp:
             pass
 
     def _fix_taskbar_style(self):
-        """无边框窗口任务栏修正：去 TOOLWINDOW 加 APPWINDOW，让任务栏图标正常显示。"""
+        """无边框窗口任务栏修正：去 TOOLWINDOW 加 APPWINDOW，让任务栏图标正常显示。
+
+        同时剥离系统标题栏样式（WS_CAPTION / WS_SYSMENU）：-toolwindow 样式一旦被
+        移除（为恢复任务栏图标），系统自带的最小化/最大化/关闭按钮会重新出现，
+        与自绘标题栏按钮叠加成两套。这里显式去掉系统标题栏按钮，只保留可缩放的
+        粗边框（WS_THICKFRAME），缩放/最大化行为不受影响。"""
         if not getattr(self, "_custom_titlebar", False) or os.name != "nt":
             return
         try:
@@ -3191,7 +3204,14 @@ class ChatApp:
             hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
             if not hwnd:
                 hwnd = self.root.winfo_id()
+            GWL_STYLE = -16
             GWL_EXSTYLE = -20
+            # 去系统标题栏 + 系统菜单（消除与自绘按钮并存的系统按钮）
+            st = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
+            st = (st & ~0x00C00000)  # ~WS_CAPTION（含 WS_BORDER+WS_DLGFRAME）
+            st = (st & ~0x00080000)  # ~WS_SYSMENU
+            ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_STYLE, st)
+            # 任务栏：去 TOOLWINDOW 加 APPWINDOW
             style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
             style = (style & ~0x80) | 0x40000  # ~WS_EX_TOOLWINDOW | WS_EX_APPWINDOW
             ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
@@ -3532,7 +3552,7 @@ class ChatApp:
                       command=self._close_search).pack(side="left", padx=(0, 16))
 
         # 消息流背景与聊天卡片同色（CTkScrollableFrame 的 transparent 不会透出底色）
-        self.feed = ctk.CTkScrollableFrame(right, fg_color=C("panel_2"), corner_radius=0)
+        self.feed = ctk.CTkScrollableFrame(right, fg_color=self._chat_bg_color(), corner_radius=0)
         self.feed.pack(fill="both", expand=True, padx=6, pady=2)
         # 滚到顶部自动加载更早历史（聊天软件标配交互）
         try:
@@ -3702,6 +3722,33 @@ class ChatApp:
         except Exception:
             pass
 
+    def _chat_bg_color(self):
+        """聊天背景色："" 默认（跟随主题）/ "deep" 深邃 / "sakura" 樱花。"""
+        try:
+            bg = getattr(self, "_chat_bg", "")
+            if bg == "deep":
+                return "#14161a" if _APPEARANCE in ("dark", "anime") else "#dde3ec"
+            if bg == "sakura":
+                return "#2a1d33" if _APPEARANCE in ("dark", "anime") else "#fdeef4"
+        except Exception:
+            pass
+        return C("panel_2")
+
+    def _apply_chat_bg(self, mode):
+        """应用聊天背景：持久化 + 更新 feed 底色并重渲染。"""
+        try:
+            self._chat_bg = str(mode or "")
+            _update_settings("chat_bg", self._chat_bg)
+            try:
+                self.feed.configure(fg_color=self._chat_bg_color())
+            except Exception:
+                pass
+            self._render_feed()
+            names = {"": "默认", "deep": "深邃", "sakura": "樱花"}
+            self._set_status(f"聊天背景：{names.get(self._chat_bg, '默认')}", "ok")
+        except Exception:
+            pass
+
     def _apply_chat_font_size(self, size):
         """应用消息字号：持久化 + 更新输入框字体 + 重渲染当前会话。"""
         try:
@@ -3811,6 +3858,18 @@ class ChatApp:
                 unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
                 command=lambda v: self._apply_chat_font_size(
                     {"小": 12, "中": 13, "大": 15}.get(v, 13))).pack(fill="x", padx=26, pady=(2, 4))
+
+            # 聊天背景（默认/深邃/樱花，持久化）
+            ctk.CTkLabel(scroll, text="聊天背景", font=(FONT, 10),
+                         text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(6, 0))
+            _bg_var = ctk.StringVar(value={"": "默认", "deep": "深邃", "sakura": "樱花"}.get(self._chat_bg, "默认"))
+            ctk.CTkSegmentedButton(
+                scroll, values=["默认", "深邃", "樱花"], variable=_bg_var,
+                font=(FONT, 11), height=28,
+                selected_color=C("accent"), selected_hover_color=C("accent_hover"),
+                unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
+                command=lambda v: self._apply_chat_bg(
+                    {"默认": "", "深邃": "deep", "樱花": "sakura"}.get(v, ""))).pack(fill="x", padx=26, pady=(2, 4))
 
             # 开机自启动（Windows 注册表 Run 键）
             autostart_var = tk.BooleanVar(value=self._is_autostart())
@@ -4045,6 +4104,13 @@ class ChatApp:
             self.root.after(
                 30, lambda: ctk.set_appearance_mode(
                     "dark" if mode in ("dark", "anime") else "light"))
+        except Exception:
+            pass
+        # ctk 外观切换会 withdraw/deiconify 触发标题栏重绘，可能重置窗口样式
+        # （系统标题栏按钮重新出现）；延迟重新剥离一次，保持自绘标题栏唯一
+        try:
+            self.root.after(120, self._fix_taskbar_style)
+            self.root.after(600, self._fix_taskbar_style)
         except Exception:
             pass
 
@@ -4529,7 +4595,9 @@ class ChatApp:
         # 切换会话时停止语音播放，避免进度条残留
         try:
             if getattr(self, "_playing_voice", None):
-                self._stop_voice_play(self._playing_voice)
+                self._stop_voice_play(self._playing_voice,
+                                      btn=getattr(self, "_playing_btn", None),
+                                      bar=getattr(self, "_playing_bar", None))
         except Exception:
             pass
         # 切换会话：清掉引用回复栏（避免残留上一条会话的回复）
@@ -4886,18 +4954,25 @@ class ChatApp:
             pass
 
     def _collapsed_groups(self):
-        """会话分组折叠状态（存会话对象，避免读盘）。"""
+        """会话分组折叠状态（懒加载自设置；读写持久化，重启保留）。"""
         if not hasattr(self, "_collapsed"):
-            self._collapsed = set()
+            try:
+                self._collapsed = set(_load_settings().get("collapsed_groups", []) or [])
+            except Exception:
+                self._collapsed = set()
         return self._collapsed
 
     def _toggle_group_collapse(self, key):
-        """点击分组标题：折叠 / 展开该分组。"""
+        """点击分组标题：折叠 / 展开该分组（状态持久化）。"""
         c = self._collapsed_groups()
         if key in c:
             c.discard(key)
         else:
             c.add(key)
+        try:
+            _update_settings("collapsed_groups", sorted(c))
+        except Exception:
+            pass
         self._apply_session_list()
 
     def _is_group_collapsed(self, key):
@@ -6624,23 +6699,28 @@ class ChatApp:
         except Exception:
             pass
 
-    def _toggle_voice_play(self, path):
-        """点击语音气泡：播放（显示进度条）；再点停止。"""
+    def _toggle_voice_play(self, path, btn=None, bar=None):
+        """点击语音气泡：播放（显示进度条）；再点停止。
+
+        btn/bar 为调用方自己的控件引用：同一条语音被转发成多条消息时，
+        _voice_btns/_voice_bars 按 path 索引会互相覆盖，用传入的引用隔离。"""
         if getattr(self, "_playing_voice", None) == path:
-            self._stop_voice_play(path)
+            self._stop_voice_play(path, btn=btn, bar=bar)
             return
         old_path = getattr(self, "_playing_voice", None)
         if old_path and old_path != path:
             self._stop_voice_play(old_path)  # 先停旧语音，避免按钮/进度残留
         self._playing_voice = path
-        bar = self._voice_bars.get(path)
+        self._playing_btn = btn
+        self._playing_bar = bar
+        bar = bar or self._voice_bars.get(path)
         if bar is not None:
             try:
                 bar.set(0)
                 bar.pack(anchor="w", pady=(4, 0))
             except Exception:
                 pass
-        btn = self._voice_btns.get(path)
+        btn = btn or self._voice_btns.get(path)
         if btn is not None:
             try:
                 btn.configure(text="⏹ 停止", fg_color=C("accent"),
@@ -6652,8 +6732,8 @@ class ChatApp:
         self._voice_start_ts = time.time()
         self._voice_tick()
 
-    def _stop_voice_play(self, path, done=False):
-        """停止播放，恢复按钮文本并隐藏进度条。"""
+    def _stop_voice_play(self, path, done=False, btn=None, bar=None):
+        """停止播放，恢复按钮文本并隐藏进度条（btn/bar 优先用调用方引用）。"""
         try:
             import winsound
             winsound.PlaySound(None, winsound.SND_PURGE)
@@ -6667,14 +6747,14 @@ class ChatApp:
             except Exception:
                 pass
             self._voice_tick_job = None
-        bar = self._voice_bars.get(path)
+        bar = bar or self._voice_bars.get(path)
         if bar is not None:
             try:
                 bar.pack_forget()
                 bar.set(0)
             except Exception:
                 pass
-        btn = self._voice_btns.get(path)
+        btn = btn or self._voice_btns.get(path)
         if btn is not None:
             try:
                 dur = self._voice_durs.get(path) or 0
@@ -6690,7 +6770,7 @@ class ChatApp:
         path = getattr(self, "_playing_voice", None)
         if not path:
             return
-        bar = self._voice_bars.get(path)
+        bar = getattr(self, "_playing_bar", None) or self._voice_bars.get(path)
         dur = self._voice_durs.get(path) or 0
         if bar is not None:
             try:
@@ -6699,8 +6779,13 @@ class ChatApp:
                     bar.set(min(1.0, el / dur))
             except Exception:
                 pass
-        if dur > 0 and (time.time() - getattr(self, "_voice_start_ts", time.time())) >= dur + 0.3:
-            self._stop_voice_play(path, done=True)
+        # 非 WAV（系统播放器播放）读不出时长：给兜底 20s 超时自动复位，避免按钮卡高亮
+        if dur <= 0:
+            dur = 20.0
+        if (time.time() - getattr(self, "_voice_start_ts", time.time())) >= dur + 0.3:
+            self._stop_voice_play(path, done=True,
+                                  btn=getattr(self, "_playing_btn", None),
+                                  bar=bar)
             return
         self._voice_tick_job = self.root.after(300, self._voice_tick)
 
@@ -8335,7 +8420,9 @@ class ChatApp:
             pass
 
     def _show_hover_bar(self, mid, bubble, name, text):
-        """在消息行空白侧显示快捷操作浮层（自己消息→左侧，对方消息→右侧）。"""
+        """在气泡外侧显示快捷操作浮层（QQ/Discord 式）：
+        自己消息→气泡左侧、对方消息→气泡右侧，浮层与气泡顶边对齐；
+        按钮：👍 回应 / ↩ 引用 / ⧉ 转发 / 🔊 朗读 / 📋 复制。"""
         try:
             if not getattr(self, "_hover_inside", False):
                 return
@@ -8349,27 +8436,28 @@ class ChatApp:
             except Exception:
                 return
             self._destroy_hover_bar(keep_state=True)
-            row = bubble.master
-            bar = ctk.CTkFrame(row, corner_radius=8, fg_color=C("panel_2"),
+            is_mine = bool(self._body_labels.get(mid)) and self._is_mine_bubble(mid)
+            bar = ctk.CTkFrame(bubble, corner_radius=8, fg_color=C("panel_2"),
                                border_width=1, border_color=C("hover"))
             self._hover_bar = bar
             self._hover_mid = mid
-            is_mine = bool(self._body_labels.get(mid)) and self._is_mine_bubble(mid)
             btns = [("👍", lambda: self._hover_react(mid)),
                     ("↩", lambda: self._hover_reply(name, text, mid)),
-                    ("⧉", lambda: self._hover_forward(mid)),
+                    ("⧉", lambda: self._hover_forward(mid, text)),
                     ("📋", lambda: self._hover_copy(text))]
             if (text or "").strip():
                 btns.insert(3, ("🔊", lambda: self._hover_speak(text)))
             for t, cmd in btns:
-                b = ctk.CTkButton(bar, text=t, width=30, height=24, corner_radius=6,
+                b = ctk.CTkButton(bar, text=t, width=28, height=24, corner_radius=6,
                                   fg_color="transparent", hover_color=C("hover"),
                                   text_color=C("text"), font=(FONT, 12), command=cmd)
                 b.pack(side="left", padx=1, pady=1)
+            # 紧贴气泡外侧放置：自己消息靠右对齐（气泡在右），浮层放其左外侧；
+            # 对方消息气泡在左，浮层放其右外侧。place 相对 bubble，保证随气泡移动。
             if is_mine:
-                bar.place(relx=0.0, x=8, y=2, anchor="nw")
+                bar.place(relx=0.0, x=-8, y=0, anchor="ne")
             else:
-                bar.place(relx=1.0, x=-8, y=2, anchor="ne")
+                bar.place(relx=1.0, x=8, y=0, anchor="nw")
             bar.bind("<Enter>", lambda e: self._hover_bar_enter())
             bar.bind("<Leave>", lambda e: self._hover_bar_leave())
             for _b in bar.winfo_children():
@@ -8441,10 +8529,30 @@ class ChatApp:
         self._destroy_hover_bar()
         self._start_reply(name, text, mid)
 
-    def _hover_forward(self, mid):
+    def _hover_forward(self, mid, text=""):
+        """转发当前消息：直接弹出转发对话框（QQ 式单条转发）。"""
         self._destroy_hover_bar()
-        self._start_multi_select()
-        self._toggle_multi_select(mid)
+        s = self._sessions.get(self._current)
+        if s is None:
+            return
+        m = self._find_msg(self._current, mid)
+        items = []
+        if m is not None:
+            p = None
+            if m.get("img_path") and os.path.isfile(m["img_path"]):
+                p = m["img_path"]
+            elif m.get("file_path") and os.path.isfile(m["file_path"]):
+                p = m["file_path"]
+            if p:
+                items.append({"type": "file", "path": p, "label": os.path.basename(p)})
+            else:
+                t = str(m.get("text", "") or "").strip()
+                if t and not m.get("system"):
+                    items.append(t)
+        if not items:
+            self._set_status("没有可转发的消息", "err")
+            return
+        self._forward_dialog(items)
 
     def _hover_copy(self, text):
         self._destroy_hover_bar()
@@ -8489,12 +8597,13 @@ class ChatApp:
         dur_txt = f"{dur:.0f}″" if dur > 0 else ""
         vbox = ctk.CTkFrame(bubble, fg_color="transparent")
         vbox.pack(fill="x", padx=12, pady=6)
-        self._voice_btns[path] = ctk.CTkButton(
+        _vbtn = ctk.CTkButton(
             vbox, text=f"🎤 语音 {dur_txt}", width=130, height=34, corner_radius=16,
             fg_color=C("input_bg"), text_color=C("text"),
-            hover_color=C("input_hover"), font=(FONT, 12),
-            command=lambda p=path: self._toggle_voice_play(p))
-        self._voice_btns[path].pack(anchor="w", side="left")
+            hover_color=C("input_hover"), font=(FONT, 12))
+        _vbtn.configure(command=lambda p=path, b=_vbtn: self._toggle_voice_play(p, btn=b))
+        _vbtn.pack(anchor="w", side="left")
+        self._voice_btns[path] = _vbtn
         # 倍速切换按钮（1x / 1.5x / 2x 循环）
         self._voice_speeds[path] = 0
         spd_btn = ctk.CTkButton(
@@ -8505,7 +8614,7 @@ class ChatApp:
         spd_btn.pack(anchor="w", side="left", padx=(6, 0))
         self._voice_spd_btns[path] = spd_btn
         # 语音右键菜单：转发 / 打开位置
-        self._voice_btns[path].bind(
+        _vbtn.bind(
             "<Button-3>",
             lambda e, p=path: self._voice_menu(e, p))
         # 播放进度条：点击播放时实时显示播放进度（QQ/Discord 风格）
@@ -8515,6 +8624,8 @@ class ChatApp:
         bar.pack(anchor="w", pady=(4, 0))
         bar.pack_forget()  # 默认隐藏，播放时才显示
         self._voice_bars[path] = bar
+        # 进度条与播放按钮一一对应：转发产生的同路径消息各持各的控件
+        _vbtn._voice_bar = bar
         self._voice_durs[path] = dur
         if mid:
             vtxt = f"🎤 语音：{os.path.basename(path)}"
@@ -8979,52 +9090,152 @@ class ChatApp:
             pass
 
     def _forward_dialog(self, items):
-        """弹出转发目标选择框，转发文字 / 图片 / 文件到指定会话。"""
+        """转发对话框：预览内容 + 搜索过滤目标 + 多目标复选批量转发。
+
+        items 为 str（单条文字）或列表（多条文字/文件 dict）。"""
         try:
             if isinstance(items, str):
                 items = [items]
             items = [it for it in (items or []) if it]
             win = ctk.CTkToplevel(self.root)
             win.title("转发到…")
-            win.geometry("360x440")
+            win.geometry("380x520")
             win.resizable(False, False)
+            try:
+                self._round_toplevel(win)
+            except Exception:
+                pass
             win.attributes("-topmost", True)
-            label = "选择转发目标"
-            if len(items) > 1:
-                label = f"选择转发目标（{len(items)} 条消息）"
-            ctk.CTkLabel(win, text=label, font=(FONT, 13, "bold"),
-                         text_color=C("text")).pack(pady=(14, 4))
-            scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
-            scroll.pack(fill="both", expand=True, padx=12, pady=8)
-            for room in self._rooms:
-                ctk.CTkButton(scroll, text=f"# {room}", height=32, corner_radius=8,
-                              anchor="w", fg_color=C("input_bg"), text_color=C("text"),
-                              hover_color=C("input_hover"), font=(FONT, 12),
-                              command=lambda r=room: self._do_forward(r, items, False, win)).pack(fill="x", pady=2)
+            ctk.CTkLabel(win, text=("转发内容" if len(items) == 1
+                                    else f"转发内容（{len(items)} 条）"),
+                         font=(FONT, 13, "bold"), text_color=C("text")).pack(pady=(14, 2))
+
+            # 内容预览（单条直接显示，多条滚动）
+            prev_h = 120 if len(items) <= 2 else 150
+            preview = ctk.CTkScrollableFrame(win, fg_color=C("input_bg"), corner_radius=8)
+            preview.pack(fill="x", padx=14, pady=(2, 6))
+            for it in items[:6]:
+                if isinstance(it, dict) and it.get("path"):
+                    ctk.CTkLabel(preview, text=f"📎 {it.get('label', '文件')}",
+                                 anchor="w", font=(FONT, 10), text_color=C("text_2")).pack(
+                        fill="x", padx=8, pady=1)
+                else:
+                    _t = str(it).replace("\n", " ")[:80]
+                    ctk.CTkLabel(preview, text=("💬 " + _t if _t else "（空消息）"),
+                                 anchor="w", font=(FONT, 10), text_color=C("text_2"),
+                                 justify="left", wraplength=300).pack(fill="x", padx=8, pady=1)
+            if len(items) > 6:
+                ctk.CTkLabel(preview, text=f"… 等 {len(items)} 条",
+                             font=(FONT, 9), text_color=C("text_mute")).pack(anchor="w", padx=8)
+
+            # 目标搜索框
+            search_var = ctk.StringVar()
+            ctk.CTkEntry(win, textvariable=search_var, height=28, corner_radius=8,
+                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                         placeholder_text="搜索转发目标…", font=(FONT, 11)).pack(fill="x", padx=14, pady=(4, 2))
+
+            # 目标列表（复选框多选）
+            sel = {}  # key -> ("group", room) 或 ("dm", cid)
+            listbox = ctk.CTkScrollableFrame(win, fg_color="transparent")
+            listbox.pack(fill="both", expand=True, padx=14, pady=(2, 4))
+            targets = []
+            for room in getattr(self, "_rooms", []) or []:
+                targets.append((f"# {room}", ("group", room)))
+            seen_dm = set()
             for s in list(self._sessions.values()):
-                if s.get("kind") == "dm":
-                    ctk.CTkButton(scroll, text=f"@ {s['name']}", height=32, corner_radius=8,
-                                  anchor="w", fg_color=C("input_bg"), text_color=C("text"),
-                                  hover_color=C("input_hover"), font=(FONT, 12),
-                                  command=lambda s=s: self._do_forward(s["cid"], items, True, win)).pack(fill="x", pady=2)
+                if s.get("kind") == "dm" and s.get("cid"):
+                    seen_dm.add(s["cid"])
+                    targets.append((f"@ {s['name']}", ("dm", s["cid"])))
+            for cid, name in self._peers.items():
+                if cid != self.cid and cid not in seen_dm and (not self._rooms or True):
+                    seen_dm.add(cid)
+                    targets.append((f"@ {name}", ("dm", cid)))
+
+            def _render_targets():
+                for w in listbox.winfo_children():
+                    w.destroy()
+                kw = (search_var.get() or "").strip().lower()
+                for label, key in targets:
+                    if kw and kw not in label.lower():
+                        continue
+                    row = ctk.CTkFrame(listbox, fg_color="transparent")
+                    row.pack(fill="x", pady=1)
+                    chk = ctk.CTkCheckBox(row, text=label, height=26,
+                                          fg_color=C("input_bg"), text_color=C("text"),
+                                          hover_color=C("input_hover"), font=(FONT, 12),
+                                          command=lambda k=key, l=label: _toggle(k, l))
+                    chk.pack(side="left", padx=(2, 0))
+                    chk._fkey = key
+
+            def _toggle(key, label):
+                if key in sel:
+                    sel.pop(key, None)
+                else:
+                    sel[key] = label
+                _update_count()
+
+            def _update_count():
+                try:
+                    n = len(sel)
+                    fwd_btn.configure(text=f"转发到 {n} 个会话 →" if n else "选择目标…",
+                                      fg_color=(C("accent") if n else C("input_bg")))
+                except Exception:
+                    pass
+
+            search_var.trace_add("write", lambda *_: _render_targets())
+            _render_targets()
+
+            # 底部操作栏
+            bottom = ctk.CTkFrame(win, fg_color="transparent")
+            bottom.pack(fill="x", padx=14, pady=(2, 12))
+            fwd_btn = ctk.CTkButton(bottom, text="选择目标…", width=150, height=32, corner_radius=8,
+                                    fg_color=C("input_bg"), text_color="#ffffff",
+                                    hover_color=C("accent_hover"), font=(FONT, 12, "bold"),
+                                    command=lambda: _do_forward_all())
+            fwd_btn.pack(side="right")
+            ctk.CTkButton(bottom, text="取消", width=70, height=32, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 12),
+                          command=win.destroy).pack(side="right", padx=(0, 8))
+
+            def _do_forward_all():
+                if not sel:
+                    self._set_status("请先选择转发目标", "err")
+                    return
+                ok_total = 0
+                fail = 0
+                for key, _label in list(sel.items()):
+                    kind, tgt = key
+                    if self._do_forward(tgt, items, kind == "dm", win, keep_open=True):
+                        ok_total += 1
+                    else:
+                        fail += 1
+                win.destroy()
+                if ok_total:
+                    self._set_status(f"已转发到 {ok_total} 个会话" + (f"，{fail} 个失败" if fail else ""), "ok")
+                else:
+                    self._set_status("转发失败", "err")
+
             win.bind("<Escape>", lambda e: win.destroy())
         except Exception:
             pass
 
-    def _do_forward(self, target, items, is_dm, win):
-        try:
-            win.destroy()
-        except Exception:
-            pass
+    def _do_forward(self, target, items, is_dm, win, keep_open=False):
+        """转发到指定会话；返回是否全部成功。keep_open=True 时保留对话框（多目标批量转发）。"""
+        if not keep_open:
+            try:
+                win.destroy()
+            except Exception:
+                pass
         if not (self.backend and self.backend.online):
             self._set_status("未连接，无法转发", "err")
-            return
+            return False
         if isinstance(items, str):
             items = [items]
         items = [it for it in (items or []) if it]
         if not items:
             self._set_status("没有可转发的消息", "err")
-            return
+            return False
         my = self.nick_var.get().strip() or "未命名"
         ok = 0
         total = len(items)
@@ -9050,7 +9261,9 @@ class ChatApp:
                             ok += 1
             except Exception:
                 pass
-        self._set_status(f"已转发 {ok}/{total} 条", "ok" if ok else "err")
+        if not keep_open:
+            self._set_status(f"已转发 {ok}/{total} 条", "ok" if ok else "err")
+        return ok == total and total > 0
 
     def _edit_message_dialog(self, mid, text):
         """弹出编辑消息对话框（预填原文，保存后提交编辑）。"""
@@ -9282,19 +9495,30 @@ class ChatApp:
         elif self._feed_filter == "file":
             msgs = [m for m in msgs if m.get("file_path")]
         if not msgs and not self._search_query:
-            # 空聊天封面：大表情 + 引导文案（有会话但还没聊过）
+            # 空聊天封面：大表情 + 引导文案 + 快捷操作按钮（有会话但还没聊过）
             cv = None
             try:
                 import tkinter as _tk3
                 nm = s.get("name", "会话")
-                cv = _tk3.Canvas(self.feed, width=420, height=220, bg=C("app_bg"),
+                cv = _tk3.Canvas(self.feed, width=420, height=230, bg=self._chat_bg_color(),
                                  highlightthickness=0)
-                cv.pack(pady=48)
-                cv.create_text(210, 60, text="🎉", font=(FONT, 40))
-                cv.create_text(210, 130, text=f"和 {nm} 开始聊天吧",
+                cv.pack(pady=40)
+                cv.create_text(210, 55, text="🎉", font=(FONT, 40))
+                cv.create_text(210, 125, text=f"和 {nm} 开始聊天吧",
                                font=(FONT, 14, "bold"), fill=C("text"))
-                cv.create_text(210, 160, text="发条消息、贴张图或按住 🎤 说句话",
+                cv.create_text(210, 152, text="发条消息、贴张图或按住 🎤 说句话",
                                font=(FONT, 11), fill=C("text_mute"))
+                # 快捷操作：💌 发起私聊 / ➕ 加入房间（Web 式引导，免翻菜单）
+                btn_row = ctk.CTkFrame(self.feed, fg_color="transparent")
+                btn_row.pack(pady=(0, 6))
+                ctk.CTkButton(btn_row, text="💌 发起私聊", width=110, height=30, corner_radius=8,
+                              fg_color=C("accent"), hover_color=C("accent_hover"),
+                              text_color="#ffffff", font=(FONT, 11, "bold"),
+                              command=self._open_dm_dialog).pack(side="left", padx=5)
+                ctk.CTkButton(btn_row, text="➕ 加入房间", width=110, height=30, corner_radius=8,
+                              fg_color=C("input_bg"), text_color=C("text_2"),
+                              hover_color=C("input_hover"), font=(FONT, 11),
+                              command=self._add_room_from_input).pack(side="left", padx=5)
             except Exception:
                 pass
             self._update_chat_title()
@@ -9520,7 +9744,9 @@ class ChatApp:
             pass
         try:
             if getattr(self, "_playing_voice", None):
-                self._stop_voice_play(self._playing_voice)
+                self._stop_voice_play(self._playing_voice,
+                                      btn=getattr(self, "_playing_btn", None),
+                                      bar=getattr(self, "_playing_bar", None))
         except Exception:
             pass
         try:

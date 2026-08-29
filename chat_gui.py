@@ -95,7 +95,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -4828,6 +4828,9 @@ class ChatApp:
         if stime:
             ctk.CTkLabel(nrow, text=stime, anchor="e",
                          text_color=C("text_mute"), font=(FONT, 9)).pack(side="right")
+        if s and (s.get("draft") or "").strip():
+            ctk.CTkLabel(row, text="📝", text_color=C("text_mute"),
+                         font=(FONT, 10), cursor="hand2").pack(side="right", padx=(0, 6))
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
@@ -4871,6 +4874,9 @@ class ChatApp:
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
+        if (s.get("draft") or "").strip():
+            ctk.CTkLabel(row, text="📝", text_color=C("text_mute"),
+                         font=(FONT, 10), cursor="hand2").pack(side="right", padx=(0, 4))
         dot = ctk.CTkLabel(row, text="●" if s["online"] else "○", width=14, anchor="e",
                            text_color=(C("online") if s["online"] else C("text_mute")),
                            font=(FONT, 9, "bold"), cursor="hand2")
@@ -6264,6 +6270,9 @@ class ChatApp:
         if getattr(self, "_playing_voice", None) == path:
             self._stop_voice_play(path)
             return
+        old_path = getattr(self, "_playing_voice", None)
+        if old_path and old_path != path:
+            self._stop_voice_play(old_path)  # 先停旧语音，避免按钮/进度残留
         self._playing_voice = path
         bar = self._voice_bars.get(path)
         if bar is not None:
@@ -6331,7 +6340,7 @@ class ChatApp:
         if dur > 0 and (time.time() - getattr(self, "_voice_start_ts", time.time())) >= dur + 0.3:
             self._stop_voice_play(path, done=True)
             return
-        self._voice_tick_job = self.root.after(100, self._voice_tick)
+        self._voice_tick_job = self.root.after(300, self._voice_tick)
 
     def _start_voice(self):
         """按住说话：开始录音。"""
@@ -6640,6 +6649,9 @@ class ChatApp:
                 return
             for em, x, y in getattr(self, "_emoji_items", []) or []:
                 if abs(event.x - x) <= 16 and abs(event.y - y) <= 16:
+                    if getattr(self, "_emoji_hl", None) == (em, x, y):
+                        return  # 高亮未变化，跳过重绘（Motion 高频触发优化）
+                    self._emoji_hl = (em, x, y)
                     cv.delete("emojihl")
                     # 圆角高亮：中间矩形 + 两端椭圆帽
                     cv.create_oval(x - 17, y - 13, x - 5, y + 13,
@@ -6650,7 +6662,9 @@ class ChatApp:
                                         fill=C("hover"), outline="", tags="emojihl")
                     cv.tag_lower("emojihl")
                     return
-            cv.delete("emojihl")
+            if getattr(self, "_emoji_hl", None) is not None:
+                self._emoji_hl = None
+                cv.delete("emojihl")
         except Exception:
             pass
 

@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.4.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.4.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -189,6 +189,7 @@ EMOJIS = [em for g in EMOJI_GROUPS for em in g["items"]]
 
 THEMES = {
     "dark": {
+        "radius_scale": 1.0,
         "app_bg": "#1e1f22", "panel": "#2b2d31", "panel_2": "#313338",
         "input_bg": "#383a40", "input_hover": "#404249",
         "accent": "#5865f2", "accent_hover": "#4752c4",
@@ -202,6 +203,7 @@ THEMES = {
         "search_hl": "#f0b429",
     },
     "light": {
+        "radius_scale": 1.0,
         "app_bg": "#eef1f6", "panel": "#ffffff", "panel_2": "#f7f8fb",
         "input_bg": "#f2f4f8", "input_hover": "#e9ebf0",
         "accent": "#1f6feb", "accent_hover": "#1a5fd0",
@@ -214,9 +216,33 @@ THEMES = {
         "mute": "#9aa0ab", "ok": "#1a7f37", "err": "#e5484d",
         "search_hl": "#f0b429",
     },
+    # 夜樱（二次元）：深紫夜空底 + 樱粉点缀 + 更圆润的圆角
+    "anime": {
+        "radius_scale": 1.4,
+        "app_bg": "#221826", "panel": "#2c1f33", "panel_2": "#362844",
+        "input_bg": "#43334f", "input_hover": "#4f3d5e",
+        "accent": "#ff7eb6", "accent_hover": "#ff66a8",
+        "mine_bubble": "#ff7eb6", "mine_text": "#3a1030",
+        "other_bubble": "#2c1f33", "other_text": "#f3e8f5",
+        "text": "#f3e8f5", "text_2": "#c9aed4", "text_mute": "#9d84ab",
+        "hover": "#3f2f4d", "selected_bg": "#4f3d5e", "selected_text": "#ffd6ea",
+        "online": "#7ce8a8", "danger": "#ff5c7a",
+        "warn_bg": "#4a3350", "warn_text": "#ffd166", "section": "#c9aed4",
+        "mute": "#9d84ab", "ok": "#7ce8a8", "err": "#ff5c7a",
+        "search_hl": "#ffb347",
+    },
 }
 
 _APPEARANCE = "dark"
+
+
+def R(n):
+    """按当前主题的圆角缩放系数取圆角值（二次元主题更圆润）。"""
+    try:
+        scale = float(THEMES.get(_APPEARANCE, THEMES["dark"]).get("radius_scale", 1.0))
+        return int(round(n * scale))
+    except Exception:
+        return n
 
 
 def set_appearance(mode, apply_ctk=True):
@@ -232,8 +258,8 @@ def set_appearance(mode, apply_ctk=True):
     _APPEARANCE = mode
     if apply_ctk:
         try:
-            # ctk 只有 dark/light；其它主题按亮色处理
-            ctk.set_appearance_mode("light" if mode != "dark" else "dark")
+            # ctk 只有 dark/light；anime 属暗色系
+            ctk.set_appearance_mode("dark" if mode in ("dark", "anime") else "light")
         except Exception:
             pass
 
@@ -3062,7 +3088,7 @@ class ChatApp:
                                           text_color=C("text_2"), font=(FONT, 14),
                                           command=self._manual_check_update)
         self.update_btn.pack(side="right", padx=(0, 8), pady=12)
-        _tbtn = {"dark": "🌙", "light": "☀️"}.get(self.appearance, "🌙")
+        _tbtn = {"dark": "🌙", "light": "☀️", "anime": "🌸"}.get(self.appearance, "🌙")
         self.theme_btn = ctk.CTkButton(top, text=_tbtn,
                                         width=40, height=32, corner_radius=8,
                                         fg_color=C("input_bg"), hover_color=C("input_hover"),
@@ -3123,6 +3149,10 @@ class ChatApp:
                                      fg_color=C("accent"), hover_color=C("accent_hover"),
                                      command=self._open_dm_dialog)
         self.dm_btn.pack(side="left", pady=12, padx=(0, 8))
+
+        # 顶栏底部的品牌色条（二次元主题下是樱粉色装饰线）
+        ctk.CTkFrame(self.root, corner_radius=0, height=3,
+                     fg_color=C("accent")).pack(fill="x")
 
         # 状态栏
         self.status_var = ctk.StringVar(value="未连接")
@@ -3241,11 +3271,11 @@ class ChatApp:
         self.reply_bar = ctk.CTkFrame(right, corner_radius=8, fg_color=C("warn_bg"))
 
         # 底部输入区
-        self._ibar = ctk.CTkFrame(right, corner_radius=12, fg_color=C("panel"))
+        self._ibar = ctk.CTkFrame(right, corner_radius=R(12), fg_color=C("panel"))
         self._ibar.pack(fill="x", padx=8, pady=(4, 10))
         ibar = self._ibar
 
-        self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=10, border_width=0,
+        self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=0,
                                         fg_color=C("input_bg"), text_color=C("text_mute"),
                                         font=(FONT, 12), wrap="word")
         self.input_box.pack(side="left", fill="x", expand=True, padx=(14, 10), pady=14)
@@ -3307,6 +3337,7 @@ class ChatApp:
             view_menu = tk.Menu(menubar, tearoff=0)
             view_menu.add_command(label="深色主题", command=lambda: self._set_theme("dark"))
             view_menu.add_command(label="浅色主题", command=lambda: self._set_theme("light"))
+            view_menu.add_command(label="二次元主题（夜樱）", command=lambda: self._set_theme("anime"))
             self._pin_var = tk.BooleanVar(value=False)
             view_menu.add_checkbutton(label="窗口置顶", variable=self._pin_var,
                                       command=self._toggle_pin_window)
@@ -3401,11 +3432,11 @@ class ChatApp:
 
             ctk.CTkLabel(win, text="外观", font=(FONT, 11),
                          text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(8, 2))
-            _am_lbl = {"system": "跟随系统", "dark": "深色", "light": "浅色"}.get(
-                self._appearance_mode, "跟随系统")
+            _am_lbl = {"system": "跟随系统", "dark": "深色", "light": "浅色",
+                       "anime": "二次元"}.get(self._appearance_mode, "跟随系统")
             _mode_var = ctk.StringVar(value=_am_lbl)
             ctk.CTkSegmentedButton(
-                win, values=["跟随系统", "深色", "浅色"], variable=_mode_var,
+                win, values=["跟随系统", "深色", "浅色", "二次元"], variable=_mode_var,
                 font=(FONT, 11), height=30,
                 selected_color=C("accent"), selected_hover_color=C("accent_hover"),
                 unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
@@ -3489,7 +3520,7 @@ class ChatApp:
     # --------------------------- 主题切换 ---------------------------
 
     def _toggle_theme(self):
-        order = ["dark", "light"]
+        order = ["dark", "light", "anime"]
         try:
             nxt = order[(order.index(self.appearance) + 1) % len(order)]
         except Exception:
@@ -3536,7 +3567,7 @@ class ChatApp:
     def _apply_appearance_mode(self, label):
         """设置中心「外观」三选：跟随系统 / 深色 / 浅色。"""
         try:
-            mapping = {"跟随系统": "system", "深色": "dark", "浅色": "light"}
+            mapping = {"跟随系统": "system", "深色": "dark", "浅色": "light", "二次元": "anime"}
             mode = mapping.get(str(label), str(label))
             if mode == "system":
                 self._appearance_mode = "system"
@@ -3567,7 +3598,7 @@ class ChatApp:
         set_appearance(mode, apply_ctk=False)
         self._rebuild_ui()
         try:
-            ctk.set_appearance_mode("light" if mode != "dark" else "dark")
+            ctk.set_appearance_mode("dark" if mode in ("dark", "anime") else "light")
         except Exception:
             pass
 
@@ -4375,7 +4406,7 @@ class ChatApp:
         unread = (s.get("unread") or 0) if s else 0
         n = sum(1 for p in self._peers.values() if room in (p.get("rooms") or []))
         preview = self._session_preview(s) if s else ""
-        row = ctk.CTkFrame(self.session_frame, corner_radius=8,
+        row = ctk.CTkFrame(self.session_frame, corner_radius=R(8),
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
         av = self._session_avatar(row, room, is_group=True)
@@ -4407,7 +4438,7 @@ class ChatApp:
         selected = key == self._current
         unread = s.get("unread") or 0
         preview = self._session_preview(s)
-        row = ctk.CTkFrame(self.session_frame, corner_radius=8,
+        row = ctk.CTkFrame(self.session_frame, corner_radius=R(8),
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
         av = self._session_avatar(row, s["name"])
@@ -6783,6 +6814,8 @@ class ChatApp:
             unread = sum(s.get("unread", 0) for s in self._sessions.values())
             if unread:
                 base = f"● {base}  [{unread} 条未读]"
+            if self.appearance == "anime":
+                base = "🌸 " + base
             if base != self._last_title:
                 self._last_title = base
                 self.root.title(base)
@@ -7007,7 +7040,7 @@ class ChatApp:
                 self._avatar_label(row, name, True, AV).pack(side="right")
             else:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="right")
-            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("mine_bubble"),
+            bubble = ctk.CTkFrame(row, corner_radius=R(14), fg_color=C("mine_bubble"),
                                    border_width=(2 if highlight else 0),
                                    border_color=bcolor)
             bubble.pack(side="right", padx=(0, GAP if show_head else 0))
@@ -7016,7 +7049,7 @@ class ChatApp:
                 self._avatar_label(row, name, False, AV).pack(side="left")
             else:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="left")
-            bubble = ctk.CTkFrame(row, corner_radius=14, fg_color=C("other_bubble"),
+            bubble = ctk.CTkFrame(row, corner_radius=R(14), fg_color=C("other_bubble"),
                                    border_width=(2 if highlight else 0),
                                    border_color=bcolor)
             bubble.pack(side="left", padx=(GAP if show_head else 0, 0))

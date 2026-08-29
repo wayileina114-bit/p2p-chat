@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.4.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.4.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -6050,12 +6050,29 @@ class ChatApp:
             cols = getattr(self, "_emoji_cols", 10)
             self._emoji_items = []
             for i, em in enumerate(g["items"]):
-                r, c = divmod(i, cols)
+                rr, c = divmod(i, cols)
                 x = 4 + c * cell + cell // 2
-                y = 4 + r * cell + cell // 2
+                y = 4 + rr * cell + cell // 2
                 cv.create_text(x, y, text=em, font=self._emoji_font, fill=C("text"))
                 self._emoji_items.append((em, x, y))
             self._emoji_drawn = gi
+            # 高度自适应：按当前分组的实际行数收缩/伸展面板（紧凑不空旷）
+            try:
+                import math as _m
+                rows = max(1, _m.ceil(len(g["items"]) / cols))
+                new_grid_h = rows * cell + 8
+                if int(cv.cget("height")) != new_grid_h:
+                    cv.configure(height=new_grid_h)
+                    win = getattr(self, "_emoji_win", None)
+                    if win is not None and win.winfo_exists():
+                        sz = getattr(self, "_emoji_size", (380, 360))
+                        total_h = (getattr(self, "_emoji_head_h", 30)
+                                   + getattr(self, "_emoji_tab_h", 30)
+                                   + new_grid_h + getattr(self, "_emoji_pad", 6) * 2)
+                        self._emoji_size = (sz[0], total_h)
+                        win.geometry(f"{sz[0]}x{total_h}+{win.winfo_x()}+{win.winfo_y()}")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -6081,7 +6098,12 @@ class ChatApp:
             for em, x, y in getattr(self, "_emoji_items", []) or []:
                 if abs(event.x - x) <= 16 and abs(event.y - y) <= 16:
                     cv.delete("emojihl")
-                    cv.create_rectangle(x - 17, y - 17, x + 17, y + 17,
+                    # 圆角高亮：中间矩形 + 两端椭圆帽
+                    cv.create_oval(x - 17, y - 13, x - 5, y + 13,
+                                   fill=C("hover"), outline="", tags="emojihl")
+                    cv.create_oval(x + 5, y - 13, x + 17, y + 13,
+                                   fill=C("hover"), outline="", tags="emojihl")
+                    cv.create_rectangle(x - 11, y - 13, x + 11, y + 13,
                                         fill=C("hover"), outline="", tags="emojihl")
                     cv.tag_lower("emojihl")
                     return
@@ -6149,6 +6171,8 @@ class ChatApp:
                 h = getattr(self, "_emoji_head_h", 30)
             tcv.create_text(10, h // 2, text="😊 表情（点击外部关闭）",
                             font=self._emoji_title_font, fill=C("text_mute"), anchor="w")
+            # 底部品牌装饰线（与主窗口顶栏色条呼应）
+            tcv.create_rectangle(0, h - 2, w, h, fill=C("accent"), outline="", width=0)
             # 锁定按钮：右侧圆角胶囊
             self._emoji_lock_box = (w - 64, 4, w - 8, h - 4)
             x1, y1, x2, y2 = self._emoji_lock_box

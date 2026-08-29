@@ -30,6 +30,9 @@ import threading
 import time
 import uuid
 
+# 图片缩略图解码并发上限：图片多时防止线程爆炸（每图一线程）
+_THUMB_SEM = threading.Semaphore(4)
+
 try:
     import paho.mqtt.client as mqtt
     _MQTT_OK = True
@@ -92,7 +95,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3297,7 +3300,7 @@ class ChatApp:
         top.pack(fill="x")
 
         self.status_var = ctk.StringVar(value="未连接")
-        self.conn_lbl = ctk.CTkLabel(top, textvariable=self.status_var,
+        self.conn_lbl = ctk.CTkLabel(top, text="○ 未连接",
                                      anchor="w", font=(FONT, 11),
                                      text_color=C("text_mute"))
         self.conn_lbl.pack(side="left", padx=(14, 0), pady=10)
@@ -4816,10 +4819,15 @@ class ChatApp:
     # --------------------------- 消息追加 / 持久化 ---------------------------
 
     def _flash_window(self):
-        """新消息到达时闪烁任务栏图标（仅 Windows，窗口获得焦点后自动停止）。"""
+        """新消息到达时闪烁任务栏图标（仅 Windows，窗口获得焦点后自动停止）。
+        3 秒节流：后台连串新消息只闪一次，避免高频调用。"""
         if os.name != "nt":
             return
         try:
+            now = time.time()
+            if now - getattr(self, "_last_flash_ts", 0.0) < 3.0:
+                return
+            self._last_flash_ts = now
             import ctypes
 
             class FLASHWINFO(ctypes.Structure):
@@ -7193,6 +7201,14 @@ class ChatApp:
             color = C(color)
         self.status_var.set(msg)
         self.status_label.configure(text_color=color)
+        # 顶栏连接状态同步（圆点 + 文本）
+        try:
+            on = bool(self.backend and self.backend.online)
+            dot = "●" if on else "○"
+            col = C("online") if on else C("text_mute")
+            self.conn_lbl.configure(text=f"{dot} {msg}", text_color=col)
+        except Exception:
+            pass
         self._update_window_title()
 
     def _update_window_title(self):
@@ -7972,7 +7988,14 @@ class ChatApp:
             self._add_bubble(name, "🖼 一张图片（无法预览）", mine, ts, mid=mid)
 
     def _decode_thumb_worker(self, path, cache_key, bubble, ph, mid=None, name="", itxt=""):
-        """后台线程解码缩略图（PIL 解码不进 UI 线程）。"""
+        """后台线程解码缩略图（PIL 解码不进 UI 线程，全局并发上限 4）。"""
+        _THUMB_SEM.acquire()
+        try:
+            self._decode_thumb_worker_inner(path, cache_key, bubble, ph, mid, name, itxt)
+        finally:
+            _THUMB_SEM.release()
+
+    def _decode_thumb_worker_inner(self, path, cache_key, bubble, ph, mid=None, name="", itxt=""):
         img = None
         try:
             from PIL import Image
@@ -8160,6 +8183,18 @@ class ChatApp:
         self._copy_to_clipboard(quote)
         self._set_status("已复制为引用格式", "ok")
 
+    def _copy_msg_link(self, mid):
+        """复制消息定位码：会话#mid，粘贴到任意会话可让别人直接定位到该消息。"""
+        try:
+            s = self._sessions.get(self._current)
+            room = (s.get("room") if s and s.get("kind") == "group"
+                    else (s.get("cid") if s else ""))
+            link = f"p2pchat://msg/{room}#{mid}"
+            self._copy_to_clipboard(link)
+            self._set_status(f"已复制消息链接（{room}#{mid[:8]}…）", "ok")
+        except Exception:
+            pass
+
     def _copy_to_clipboard(self, text):
         try:
             self.root.clipboard_clear()
@@ -8213,6 +8248,9 @@ class ChatApp:
             menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="复制为引用", command=lambda: self._copy_as_quote(name, text))
+            if mid:
+                menu.add_command(label="复制消息链接",
+                                 command=lambda: self._copy_msg_link(mid))
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
             menu.add_command(label="多选转发…", command=self._start_multi_select)
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text, mid))
@@ -8882,6 +8920,10 @@ class ChatApp:
         except Exception:
             pass
         try:
+            # 修复：最大化状态退出会保存全屏几何，下次启动直接全屏——先还原再保存
+            if getattr(self, "_maximized", False):
+                if getattr(self, "_restore_geo", None):
+                    self.root.geometry(self._restore_geo)
             _update_settings("window_geometry", self.root.geometry())
         except Exception:
             pass

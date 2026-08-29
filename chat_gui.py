@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -6372,8 +6372,15 @@ class ChatApp:
                              font=(FONT, 12)).pack(pady=24)
                 win.bind("<Escape>", lambda e: win.destroy())
                 return
-            ctk.CTkLabel(win, text=f"📢 共 {len(items)} 条 @我的消息 · 点击跳转",
-                         text_color=C("accent"), font=(FONT, 11, "bold")).pack(pady=(12, 4))
+            top_row = ctk.CTkFrame(win, fg_color="transparent")
+            top_row.pack(fill="x", padx=12, pady=(10, 2))
+            ctk.CTkLabel(top_row, text=f"📢 共 {len(items)} 条 @我的消息 · 点击跳转",
+                         text_color=C("accent"), font=(FONT, 11, "bold")).pack(side="left")
+            # 一键清除所有 @我 角标（保留消息，仅消红点）
+            ctk.CTkButton(top_row, text="全部已读", width=76, height=26, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 10),
+                          command=lambda: self._mark_all_mentions_read(win)).pack(side="right")
             scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
             scroll.pack(fill="both", expand=True, padx=12, pady=(0, 10))
             for ts, key, m in items[:100]:
@@ -6387,6 +6394,23 @@ class ChatApp:
                     command=lambda k=key, mm=m.get("mid"): self._jump_mention(win, k, mm))
                 row.pack(fill="x", pady=2)
             win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
+    def _mark_all_mentions_read(self, win=None):
+        """清除所有会话的 @我 角标（消息保留）。"""
+        try:
+            for s in self._sessions.values():
+                s["@me"] = False
+            self._refresh_mention_btn()
+            self._last_list_fp = None
+            self._apply_session_list()
+            self._set_status("所有 @我 已标为已读", "ok")
+            if win is not None:
+                try:
+                    win.destroy()
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -8056,7 +8080,8 @@ class ChatApp:
     def _refresh_status_bar(self):
         if self.backend and self.backend.online:
             total = len(self._peers)
-            self._set_status(f"已连接 · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
+            host = getattr(self, "broker", "") or DEFAULT_BROKER
+            self._set_status(f"已连接 {host} · {len(self._rooms)} 个房间 · 共 {total} 人在线", "ok")
         else:
             self._set_status("未连接", "mute")
 

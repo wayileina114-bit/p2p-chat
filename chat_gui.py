@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -9623,11 +9623,16 @@ class ChatApp:
             pass
 
     def _render_system_line(self, text):
-        ctk.CTkLabel(self.feed, text=text, text_color=C("text_mute"), wraplength=560,
-                     justify="center", font=(FONT, 10)).pack(pady=6)
+        """系统消息行：居中文本 + 两侧装饰线（QQ 式时间线外观）。"""
+        row = ctk.CTkFrame(self.feed, fg_color="transparent")
+        row.pack(fill="x", padx=16, pady=5)
+        ctk.CTkFrame(row, height=1, fg_color=C("hover")).pack(side="left", fill="x", expand=True, padx=(0, 8))
+        ctk.CTkLabel(row, text=str(text), text_color=C("text_mute"), wraplength=460,
+                     justify="center", font=(FONT, 10)).pack(side="left")
+        ctk.CTkFrame(row, height=1, fg_color=C("hover")).pack(side="left", fill="x", expand=True, padx=(8, 0))
 
     def _render_pinned_card(self, m):
-        """置顶消息卡片：固定显示在消息列表最上方。"""
+        """置顶消息卡片：固定显示在消息列表最上方；点击卡片跳到原消息位置。"""
         try:
             card = ctk.CTkFrame(self.feed, corner_radius=10, fg_color=C("warn_bg"))
             card.pack(fill="x", padx=12, pady=4)
@@ -9640,9 +9645,18 @@ class ChatApp:
                           fg_color=C("input_bg"), text_color=C("warn_text"),
                           hover_color=C("input_hover"), font=(FONT, 10),
                           command=lambda: self._toggle_pin(mid)).pack(side="right")
-            ctk.CTkLabel(card, text=str(m.get("text", ""))[:200], text_color=C("warn_text"),
-                         font=(FONT, 11), anchor="w", justify="left",
-                         wraplength=480).pack(fill="x", padx=12, pady=(2, 8))
+            body = ctk.CTkLabel(card, text=str(m.get("text", ""))[:200], text_color=C("warn_text"),
+                                font=(FONT, 11), anchor="w", justify="left",
+                                wraplength=480)
+            body.pack(fill="x", padx=12, pady=(2, 8))
+            # 点击卡片正文/标题 → 滚动到原消息并高亮
+            if mid:
+                for _w in (card, top, body):
+                    try:
+                        _w.configure(cursor="hand2")
+                        _w.bind("<Button-1>", lambda e, mm=mid: self._jump_to_message(mm), add="+")
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -9903,14 +9917,12 @@ class ChatApp:
                 continue
             ts = m.get("ts")
             if last_seen and ts and float(ts) > last_seen and not shown_new and not m.get("mine"):
-                ctk.CTkLabel(self.feed, text="── 新消息 ──", text_color=C("accent"),
-                             font=(FONT, 10, "bold")).pack(pady=(8, 2))
+                self._render_system_line("新消息")
                 shown_new = True
             dlabel = _day_label(ts) if ts else ""
             day_break = bool(dlabel and dlabel != last_day)
             if day_break:
-                ctk.CTkLabel(self.feed, text=f"── {dlabel} ──", text_color=C("text_mute"),
-                             font=(FONT, 10)).pack(pady=(8, 2))
+                self._render_system_line(dlabel)
                 last_day = dlabel
             show_head = day_break or self._should_show_head(msgs, idx)
             if m.get("system"):

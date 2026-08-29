@@ -95,7 +95,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -4286,6 +4286,12 @@ class ChatApp:
                 self._stop_voice_play(self._playing_voice)
         except Exception:
             pass
+        # 切换会话：清掉引用回复栏（避免残留上一条会话的回复）
+        try:
+            if self._reply_to is not None:
+                self._cancel_reply()
+        except Exception:
+            pass
         # 记录离开旧会话的时间，用于回来后画“新消息”分隔线
         old = self._sessions.get(self._current)
         if old is not None and old.get("key") != key:
@@ -4473,12 +4479,36 @@ class ChatApp:
                 pass
         self._refresh_members()
 
-    def _refresh_members(self):
-        """刷新成员列表内容（在线成员 / 私聊对方状态）。"""
+    def _refresh_members(self, debounce=False):
+        """刷新成员列表内容（在线成员 / 私聊对方状态）。
+        debounce=True 时合并连串更新（peers 批量变化用）；默认立即刷新。"""
         if not self._members_visible:
             return
-        for w in self.members_frame.winfo_children():
-            w.destroy()
+        if debounce:
+            if getattr(self, "_members_after", None) is not None:
+                try:
+                    self.root.after_cancel(self._members_after)
+                except Exception:
+                    pass
+            self._members_after = self.root.after(120, self._apply_members_ui)
+            return
+        try:
+            self._apply_members_ui()
+        except Exception:
+            pass
+
+    def _apply_members_ui(self):
+        try:
+            self._members_after = None
+        except Exception:
+            pass
+        if not getattr(self, "_members_visible", False):
+            return
+        try:
+            for w in self.members_frame.winfo_children():
+                w.destroy()
+        except Exception:
+            return
         s = self._sessions.get(self._current)
         if s is None:
             return
@@ -4651,6 +4681,31 @@ class ChatApp:
         return ctk.CTkLabel(parent, text=txt, width=w, height=20, corner_radius=R(10),
                             fg_color=C("danger"), text_color="#ffffff", font=(FONT, 10, "bold"))
 
+    def _bind_row_drop(self, row, key):
+        """拖拽文件到会话行：直接发送到该会话（Web 式快捷操作）。"""
+        if not _DND_READY:
+            return
+        try:
+            row.drop_target_register(DND_FILES)
+            row.dnd_bind("<<Drop>>", lambda e, k=key: self._drop_to_session(e, k))
+        except Exception:
+            pass
+
+    def _drop_to_session(self, event, key):
+        try:
+            paths = self.root.tk.splitlist(event.data)
+            if not paths:
+                return
+            if key != self._current:
+                self._switch_to(key)
+            for p in paths:
+                p = str(p).strip()
+                if p and os.path.isfile(p):
+                    self._do_send_file(p)
+            return "break"
+        except Exception:
+            return None
+
     def _bind_row_hover(self, row, selected):
         def on_enter(_e):
             if not selected:
@@ -4736,6 +4791,7 @@ class ChatApp:
             w.bind("<Button-3>", lambda e, k=key: self._group_context_menu(e, k))
         cross.bind("<Button-1>", lambda e, r=room: self._remove_room(r))
         self._bind_row_hover(row, selected)
+        self._bind_row_drop(row, key)
 
     def _add_dm_item(self, s):
         key = s["key"]
@@ -4776,6 +4832,7 @@ class ChatApp:
             w.bind("<Button-1>", lambda e, k=key: self._switch_to(k))
             w.bind("<Button-3>", lambda e, s=s: self._dm_context_menu(e, s))
         self._bind_row_hover(row, selected)
+        self._bind_row_drop(row, key)
 
     def _add_contact_item(self, c):
         """收藏联系人条目：点击发起私聊，右键取消收藏。"""
@@ -5992,7 +6049,16 @@ class ChatApp:
         return names
 
     def _autosize_input(self):
-        """输入框高度自适应：内容多行时自动增高，发送后恢复。"""
+        """输入框高度自适应：内容多行时自动增高，发送后恢复（300ms 节流）。"""
+        if getattr(self, "_autosize_after", None) is not None:
+            try:
+                self.root.after_cancel(self._autosize_after)
+            except Exception:
+                pass
+        self._autosize_after = self.root.after(300, self._do_autosize_input)
+
+    def _do_autosize_input(self):
+        self._autosize_after = None
         try:
             box = self.input_box
             cur = int(box.cget("height"))
@@ -6632,6 +6698,9 @@ class ChatApp:
                 if sel:
                     bcv.create_rectangle(x, 3, x + bw, h - 3,
                                          fill=C("accent"), outline="", width=0)
+                    # 底部 accent 指示条（选中页签下划线）
+                    bcv.create_rectangle(x + 6, h - 2, x + bw - 6, h,
+                                         fill="#ffffff", outline="", width=0)
                 bcv.create_text(x + bw // 2, h // 2, text=g["label"],
                                 font=self._emoji_tab_font,
                                 fill=("#ffffff" if sel else C("text")))
@@ -7188,7 +7257,7 @@ class ChatApp:
                             s["name"] = str(p["name"])[:40]
             self._schedule_session_list()
             self._update_chat_title()
-            self._refresh_members()
+            self._refresh_members(debounce=True)  # presence 批量更新合并刷新
             self._refresh_status_bar()
         except Exception:
             pass

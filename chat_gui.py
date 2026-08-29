@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -9691,9 +9691,11 @@ class ChatApp:
 
             # 目标搜索框
             search_var = ctk.StringVar()
-            ctk.CTkEntry(win, textvariable=search_var, height=28, corner_radius=8,
-                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
-                         placeholder_text="搜索转发目标…", font=(FONT, 11)).pack(fill="x", padx=14, pady=(4, 2))
+            _search_entry = ctk.CTkEntry(win, textvariable=search_var, height=28, corner_radius=8,
+                                         border_width=0, fg_color=C("input_bg"), text_color=C("text"),
+                                         placeholder_text="搜索转发目标…", font=(FONT, 11))
+            _search_entry.pack(fill="x", padx=14, pady=(4, 2))
+            _search_entry.bind("<Return>", lambda e: _do_forward_all())
 
             # 目标列表（复选框多选）
             sel = {}  # key -> ("group", room) 或 ("dm", cid)
@@ -9727,6 +9729,12 @@ class ChatApp:
                                           command=lambda k=key, l=label: _toggle(k, l))
                     chk.pack(side="left", padx=(2, 0))
                     chk._fkey = key
+                    # 行 hover 高亮（QQ 式转发目标选择）
+                    try:
+                        chk.bind("<Enter>", lambda e, r_=row: r_.configure(fg_color=C("hover")))
+                        chk.bind("<Leave>", lambda e, r_=row: r_.configure(fg_color="transparent"))
+                    except Exception:
+                        pass
 
             def _toggle(key, label):
                 if key in sel:
@@ -9758,6 +9766,27 @@ class ChatApp:
                           fg_color=C("input_bg"), text_color=C("text_2"),
                           hover_color=C("input_hover"), font=(FONT, 12),
                           command=win.destroy).pack(side="right", padx=(0, 8))
+            # 全选 / 清空（批量选择目标）
+            def _select_all():
+                sel.clear()
+                for _lbl, _key in targets:
+                    sel[_key] = _lbl
+                _render_targets()
+                _update_count()
+
+            def _clear_all():
+                sel.clear()
+                _render_targets()
+                _update_count()
+
+            ctk.CTkButton(bottom, text="全选", width=52, height=32, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 11),
+                          command=_select_all).pack(side="left")
+            ctk.CTkButton(bottom, text="清空", width=52, height=32, corner_radius=8,
+                          fg_color=C("input_bg"), text_color=C("text_2"),
+                          hover_color=C("input_hover"), font=(FONT, 11),
+                          command=_clear_all).pack(side="left", padx=(0, 6))
 
             def _do_forward_all():
                 if not sel:

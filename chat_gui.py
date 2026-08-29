@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -6178,7 +6178,16 @@ class ChatApp:
     def _open_global_search(self, event=None):
         """全局搜索（Ctrl+Shift+F）：跨所有会话实时搜索，列出命中消息预览，点击直达。"""
         try:
+            # 重复打开：先关旧窗口（避免 Ctrl+Shift+F 连按残留多个窗口）
+            old = getattr(self, "_global_search_win", None)
+            if old is not None:
+                try:
+                    if old.winfo_exists():
+                        old.destroy()
+                except Exception:
+                    pass
             win = ctk.CTkToplevel(self.root)
+            self._global_search_win = win
             win.title("全局搜索")
             win.geometry("480x540")
             win.resizable(False, False)
@@ -6196,6 +6205,26 @@ class ChatApp:
             results = ctk.CTkScrollableFrame(win, fg_color="transparent")
             results.pack(fill="both", expand=True, padx=14, pady=(0, 10))
             _search_after = {"id": None}
+            _hit_rows = []   # (row, key, mid) 键盘导航用
+            _hit_idx = {"v": -1}
+
+            def _nav(delta):
+                """↑↓ 选择命中行（高亮），Enter 直达。"""
+                if not _hit_rows:
+                    return
+                _hit_idx["v"] = (_hit_idx["v"] + delta) % len(_hit_rows)
+                for i, (row, _k, _m) in enumerate(_hit_rows):
+                    try:
+                        row.configure(fg_color=(C("accent") if i == _hit_idx["v"] else C("input_bg")))
+                    except Exception:
+                        pass
+
+            def _enter():
+                if not _hit_rows:
+                    return
+                i = max(0, _hit_idx["v"])
+                _k, _m = _hit_rows[i][1], _hit_rows[i][2]
+                self._jump_global_msg(win, _k, _m)
 
             def _do_search(_e=None):
                 if _search_after["id"] is not None:
@@ -6241,11 +6270,14 @@ class ChatApp:
                                  text_color=C("text_mute"), font=(FONT, 11)).pack(pady=16)
                     return
                 shown = min(len(hits), MAX_HITS)
-                ctk.CTkLabel(results, text=f"共 {total} 条命中 · 点击直达",
+                ctk.CTkLabel(results, text=f"共 {total} 条命中 · ↑↓ 选择 / Enter 直达 / 点击跳转",
                              text_color=C("accent"), font=(FONT, 10, "bold")).pack(pady=(2, 4))
+                _hit_rows.clear()
+                _hit_idx["v"] = -1
                 for key, mid, name, ts, snip in hits[:shown]:
                     row = ctk.CTkFrame(results, fg_color=C("input_bg"), corner_radius=8)
                     row.pack(fill="x", pady=2)
+                    _hit_rows.append((row, key, mid))
                     row.bind("<Button-1>",
                              lambda e, k=key, mm=mid: self._jump_global_msg(win, k, mm))
                     head = ctk.CTkFrame(row, fg_color="transparent")
@@ -6266,7 +6298,9 @@ class ChatApp:
                                  text_color=C("text_mute"), font=(FONT, 9)).pack(pady=(2, 4))
 
             entry.bind("<KeyRelease>", _do_search)
-            entry.bind("<Return>", _do_search)
+            entry.bind("<Return>", _enter)
+            entry.bind("<Down>", lambda e: (_nav(1), "break")[1])
+            entry.bind("<Up>", lambda e: (_nav(-1), "break")[1])
             win.bind("<Escape>", lambda e: win.destroy())
             entry.focus_set()
         except Exception:

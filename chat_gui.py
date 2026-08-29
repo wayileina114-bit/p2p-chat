@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3337,39 +3337,24 @@ class ChatApp:
                                        text_color=C("text"), anchor="w", cursor="hand2")
         self.chat_title.pack(side="left", fill="x", expand=True)
         self.chat_title.bind("<Double-Button-1>", lambda e: self._copy_current_chat_id())
-        self.members_btn = ctk.CTkButton(self.title_row, text="👥 成员", width=74, height=26,
-                                         corner_radius=8, font=(FONT, 11),
+        self.members_btn = ctk.CTkButton(self.title_row, text="👥", width=32, height=26,
+                                         corner_radius=R(8), font=(FONT, 12),
                                          fg_color=C("input_bg"), text_color=C("text_2"),
                                          hover_color=C("input_hover"), command=self._toggle_members)
         self.members_btn.pack(side="right")
+        # ⋯ 更多菜单：全部已读 / 消息筛选 / @我汇总（收纳低频操作，标题行更清爽）
+        self.more_btn = ctk.CTkButton(self.title_row, text="⋯", width=32, height=26,
+                                      corner_radius=R(8), font=(FONT, 13, "bold"),
+                                      fg_color=C("input_bg"), text_color=C("text_2"),
+                                      hover_color=C("input_hover"),
+                                      command=lambda: self._title_more_menu())
+        self.more_btn.pack(side="right", padx=(0, 6))
         self.mention_btn = ctk.CTkButton(self.title_row, text="📢 @我", width=76, height=26,
-                                         corner_radius=8, font=(FONT, 11),
+                                         corner_radius=R(8), font=(FONT, 11),
                                          fg_color=C("input_bg"), text_color=C("text_2"),
                                          hover_color=C("input_hover"), command=self._open_mentions)
         self.mention_btn.pack(side="right", padx=(0, 6))
         self._refresh_mention_btn()
-        self.readall_btn = ctk.CTkButton(self.title_row, text="✔ 全部已读", width=82, height=26,
-                                         corner_radius=8, font=(FONT, 11),
-                                         fg_color=C("input_bg"), text_color=C("text_2"),
-                                         hover_color=C("input_hover"), command=self._mark_all_read)
-        self.readall_btn.pack(side="right", padx=(0, 6))
-        # 消息筛选：只看图片 / 只看文件（QQ 式）
-        _fimg_on = self._feed_filter == "img"
-        _ffile_on = self._feed_filter == "file"
-        self.filter_img_btn = ctk.CTkButton(
-            self.title_row, text="🖼 图片", width=62, height=26, corner_radius=8,
-            font=(FONT, 11),
-            fg_color=(C("accent") if _fimg_on else C("input_bg")),
-            text_color=("#ffffff" if _fimg_on else C("text_2")),
-            hover_color=C("input_hover"), command=lambda: self._toggle_feed_filter("img"))
-        self.filter_img_btn.pack(side="right", padx=(0, 6))
-        self.filter_file_btn = ctk.CTkButton(
-            self.title_row, text="📎 文件", width=62, height=26, corner_radius=8,
-            font=(FONT, 11),
-            fg_color=(C("accent") if _ffile_on else C("input_bg")),
-            text_color=("#ffffff" if _ffile_on else C("text_2")),
-            hover_color=C("input_hover"), command=lambda: self._toggle_feed_filter("file"))
-        self.filter_file_btn.pack(side="right", padx=(0, 6))
 
         # 成员列表面板（默认隐藏，点「👥 成员」开关）
         self.members_frame = ctk.CTkFrame(right, corner_radius=8, fg_color=C("panel"))
@@ -4387,6 +4372,24 @@ class ChatApp:
             dot = "🟢" if online else "⚪"
             self.chat_title.configure(text=f"{dot} 私聊 · {s['name']}")
 
+    def _title_more_menu(self):
+        """标题行 ⋯ 更多菜单：全部已读 / 消息筛选。"""
+        try:
+            m = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
+            m.add_command(label="✔ 全部已读", command=self._mark_all_read)
+            m.add_separator()
+            fimg = "✓ 只看图片" if self._feed_filter == "img" else "只看图片"
+            ffile = "✓ 只看文件" if self._feed_filter == "file" else "只看文件"
+            m.add_command(label=fimg, command=lambda: self._toggle_feed_filter("img"))
+            m.add_command(label=ffile, command=lambda: self._toggle_feed_filter("file"))
+            m.tk_popup(self.more_btn.winfo_rootx(),
+                       self.more_btn.winfo_rooty() + self.more_btn.winfo_height())
+        finally:
+            try:
+                m.grab_release()
+            except Exception:
+                pass
+
     def _toggle_members(self):
         """展开 / 收起当前会话的成员列表。"""
         self._members_visible = not self._members_visible
@@ -4599,6 +4602,23 @@ class ChatApp:
         txt = txt.replace("\n", " ").strip()
         return txt if len(txt) <= 22 else txt[:22] + "…"
 
+    def _session_time(self, s):
+        """会话最后一条消息的短时间（今天显示 HH:MM，更早显示 月-日）。"""
+        msgs = s.get("messages") or []
+        if not msgs:
+            return ""
+        ts = msgs[-1].get("ts")
+        if not ts:
+            return ""
+        try:
+            lt = time.localtime(float(ts))
+            now = time.localtime()
+            if lt[:3] == now[:3]:
+                return time.strftime("%H:%M", lt)
+            return time.strftime("%m-%d", lt)
+        except Exception:
+            return ""
+
     def _add_group_item(self, room):
         key = self._group_key(room)
         selected = key == self._current
@@ -4614,9 +4634,15 @@ class ChatApp:
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
         room_label = ("🔕 " + room) if muted else room
-        ctk.CTkLabel(mid, text=room_label + (f"  {n}" if n else ""), anchor="w",
+        nrow = ctk.CTkFrame(mid, fg_color="transparent")
+        nrow.pack(fill="x")
+        ctk.CTkLabel(nrow, text=room_label + (f"  {n}" if n else ""), anchor="w",
                      text_color=(C("selected_text") if selected else C("text")),
-                     font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2").pack(anchor="w")
+                     font=(FONT, 12, "bold" if selected else "normal"), cursor="hand2").pack(side="left")
+        stime = self._session_time(s) if s else ""
+        if stime:
+            ctk.CTkLabel(nrow, text=stime, anchor="e",
+                         text_color=C("text_mute"), font=(FONT, 9)).pack(side="right")
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
@@ -4644,10 +4670,16 @@ class ChatApp:
         av = self._session_avatar(row, s["name"])
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)
-        ctk.CTkLabel(mid, text=(("🔕 " + s["name"]) if self._is_muted(key) else s["name"]), anchor="w",
+        nrow = ctk.CTkFrame(mid, fg_color="transparent")
+        nrow.pack(fill="x")
+        ctk.CTkLabel(nrow, text=(("🔕 " + s["name"]) if self._is_muted(key) else s["name"]), anchor="w",
                      text_color=(C("selected_text") if selected else C("text")),
                      font=(FONT, 12, "bold" if (selected or unread) else "normal"),
-                     cursor="hand2").pack(anchor="w")
+                     cursor="hand2").pack(side="left")
+        stime = self._session_time(s)
+        if stime:
+            ctk.CTkLabel(nrow, text=stime, anchor="e",
+                         text_color=C("text_mute"), font=(FONT, 9)).pack(side="right")
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(anchor="w")
@@ -4844,9 +4876,21 @@ class ChatApp:
 
     def _reset_input_hint(self):
         self.input_box.delete("1.0", "end")
-        self.input_box.insert("1.0", HINT)
+        self.input_box.insert("1.0", self._input_hint_text())
         self.input_box.configure(text_color=C("text_mute"))
         self._hint_active = True
+
+    def _input_hint_text(self):
+        """动态输入提示：按当前会话类型生成（Discord 式）。"""
+        try:
+            s = self._sessions.get(self._current)
+            if s and s.get("kind") == "dm":
+                return f"发消息给 {s.get('name', '对方')}，回车发送；图片 / 文件可直接拖入"
+            if s and s.get("kind") == "group":
+                return f"发消息到 #{s.get('room', '')}，回车发送；图片 / 文件可直接拖入"
+        except Exception:
+            pass
+        return HINT
 
     def _on_input_focus_in(self, event):
         if self._hint_active:
@@ -8479,6 +8523,24 @@ class ChatApp:
             msgs = [m for m in msgs if m.get("img_path")]
         elif self._feed_filter == "file":
             msgs = [m for m in msgs if m.get("file_path")]
+        if not msgs and not self._search_query:
+            # 空聊天封面：大表情 + 引导文案（有会话但还没聊过）
+            cv = None
+            try:
+                import tkinter as _tk3
+                nm = s.get("name", "会话")
+                cv = _tk3.Canvas(self.feed, width=420, height=220, bg=C("app_bg"),
+                                 highlightthickness=0)
+                cv.pack(pady=48)
+                cv.create_text(210, 60, text="🎉", font=(FONT, 40))
+                cv.create_text(210, 130, text=f"和 {nm} 开始聊天吧",
+                               font=(FONT, 14, "bold"), fill=C("text"))
+                cv.create_text(210, 160, text="发条消息、贴张图或按住 🎤 说句话",
+                               font=(FONT, 11), fill=C("text_mute"))
+            except Exception:
+                pass
+            self._update_chat_title()
+            return
         if self._feed_filter and not msgs:
             ctk.CTkLabel(self.feed,
                          text=f"（当前会话没有{'图片' if self._feed_filter == 'img' else '文件'}消息）",

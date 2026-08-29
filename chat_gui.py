@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3570,6 +3570,10 @@ class ChatApp:
         self.search_entry.bind("<Escape>", lambda e: self._close_search())
         self.search_entry.bind("<Return>", lambda e: self._jump_search_hit(1))
         self.search_entry.bind("<Shift-Return>", lambda e: self._jump_search_hit(-1))
+        # 命中计数标签（_apply_search 更新）
+        self.search_count_lbl = ctk.CTkLabel(self.search_frame, text="", font=(FONT, 9),
+                                             text_color=C("accent"))
+        self.search_count_lbl.pack(side="left", padx=(0, 6))
         ctk.CTkButton(self.search_frame, text="▲", width=28, height=28, corner_radius=8,
                       fg_color=C("input_bg"), text_color=C("text_2"),
                       hover_color=C("input_hover"), font=(FONT, 10),
@@ -3661,9 +3665,11 @@ class ChatApp:
                                       command=self._send_text)
         self.send_btn.pack(side="right", padx=(0, 12), pady=10)
 
-        # Ctrl+F 打开会话内消息搜索
+        # Ctrl+F 打开会话内消息搜索；F3 / Shift+F3 在命中间跳转（QQ 式）
         self.root.bind("<Control-f>", self._open_search)
         self.root.bind("<Control-F>", self._open_search)
+        self.root.bind("<F3>", lambda e: self._jump_search_hit(1))
+        self.root.bind("<Shift-F3>", lambda e: self._jump_search_hit(-1))
         # 全局快捷键：Ctrl+Shift+F 全局搜索 / Ctrl+N 发起私聊 / Ctrl+R 重连 / Alt+↑↓ 切换会话
         self.root.bind("<Control-Shift-F>", self._open_global_search)
         self.root.bind("<Control-Shift-f>", self._open_global_search)
@@ -6069,6 +6075,11 @@ class ChatApp:
                     if m.get("mid") and self._msg_matches_search(m, q)]
         self._search_hits = hits
         self._search_hit_idx = -1
+        try:
+            n = len(hits)
+            self.search_count_lbl.configure(text=(f"{n} 条" if n else "无命中"))
+        except Exception:
+            pass
         self._render_feed()
 
     def _msg_matches_search(self, m, q):

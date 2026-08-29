@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.3.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.4.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3600,16 +3600,15 @@ class ChatApp:
             nick = self.nick_var.get().strip()
         except Exception:
             nick = self._profile_name
-        # 主题重建优化：先隐藏窗口避免每个控件销毁时触发重绘，再逐批销毁
-        # （直接全部 destroy 在解放图片引用时最慢，可达 1多秒）
+        # 主题切换不再整窗消失重载：盖一层新主题底色的遮罩，销毁重建在遮罩后进行，
+        # 完成后掀开——窗口保持可见、任务栏不闪、位置尺寸不丢，观感是"瞬间换装"。
+        overlay = None
         try:
-            self.root.withdraw()
+            overlay = tk.Frame(self.root, bg=C("app_bg"), highlightthickness=0)
+            overlay.place(x=0, y=0, relwidth=1, relheight=1)
+            overlay.lift()
         except Exception:
-            pass
-        try:
-            self.root.update_idletasks()
-        except Exception:
-            pass
+            overlay = None
         # 先释放图片引用（CTkImage 持有 Tk 图片对象，先清引用再销毁控件能显著减少释放时间）
         self._images = []
         self._thumb_cache = {}
@@ -3619,6 +3618,8 @@ class ChatApp:
         except Exception:
             pass
         for w in list(self.root.winfo_children()):
+            if overlay is not None and w is overlay:
+                continue  # 遮罩保留到最后
             try:
                 w.destroy()
             except Exception:
@@ -3637,13 +3638,15 @@ class ChatApp:
         finally:
             self.RENDER_MAX = _saved
         self._update_window_title()
+        # 掀开遮罩（重建完成后）
+        if overlay is not None:
+            try:
+                overlay.destroy()
+            except Exception:
+                pass
         # 切换完成后延迟补全剩余消息（后台分批，不卡切换）
         try:
             self.root.after(250, self._render_feed)
-        except Exception:
-            pass
-        try:
-            self.root.deiconify()
         except Exception:
             pass
 
@@ -5821,64 +5824,79 @@ class ChatApp:
         if win is None:
             try:
                 import tkinter as _tk
-                win = ctk.CTkToplevel(self.root)
+                # 原生 tk.Toplevel（而非 CTkToplevel）：CTk 的 geometry() 会按 DPI
+                # 二次缩放（如 133% 时 640x388 被放大成 960x582），导致弹出位置/尺寸
+                # 异常飞出屏幕。原生 Toplevel 的 geometry 是精确逻辑像素。
+                win = _tk.Toplevel(self.root)
                 self._emoji_win = win
                 win.overrideredirect(True)
-                win.configure(fg_color=C("panel"))
+                win.configure(bg=C("panel"))
                 win.attributes("-topmost", True)
                 self._emoji_group_idx = 0
                 self._emoji_locked = False
-                # 顶栏：标题 + 锁定按钮
-                headbar = ctk.CTkFrame(win, fg_color="transparent")
-                headbar.pack(fill="x", padx=6, pady=(4, 0))
-                ctk.CTkLabel(headbar, text="表情（点击外部关闭）", text_color=C("text_mute"),
-                             font=(FONT, 10)).pack(side="left")
-                self._emoji_lock_btn = ctk.CTkButton(
-                    headbar, text="🔓", width=30, height=22, corner_radius=6,
-                    fg_color=C("input_bg"), text_color=C("text_2"),
-                    hover_color=C("input_hover"), font=(FONT, 10),
-                    command=self._toggle_emoji_lock)
-                self._emoji_lock_btn.pack(side="right")
-                # 分类页签（最近使用在前，有记录才显示）
+                self._emoji_font = getattr(self, "_emoji_font", None) or ("Segoe UI Emoji", 15)
+                self._emoji_tab_font = (FONT, 9)
+                self._emoji_title_font = (FONT, 10)
+                # 分类页签（最近使用在前，有记录才显示；标签取短名防页签溢出）
                 self._recent_emojis = list(_load_settings().get("recent_emojis", []) or [])[:24]
                 self._emoji_groups = []
                 if self._recent_emojis:
                     self._emoji_groups.append({"label": "最近", "items": self._recent_emojis})
-                self._emoji_groups.extend(EMOJI_GROUPS)
-                tabbar = ctk.CTkFrame(win, fg_color="transparent")
-                tabbar.pack(fill="x", padx=4, pady=(2, 0))
-                self._emoji_tab_btns = []
-                for gi, g in enumerate(self._emoji_groups):
-                    tb = ctk.CTkButton(tabbar, text=g["label"], width=0, height=22, corner_radius=8,
-                                       fg_color=C("input_bg"), text_color=C("text"),
-                                       hover_color=C("input_hover"), font=(FONT, 9),
-                                       command=lambda idx=gi: self._switch_emoji_group(idx))
-                    tb.pack(side="left", padx=1, fill="x", expand=True)
-                    self._emoji_tab_btns.append(tb)
-                # 单个 Canvas：画当前分组全部表情
+                for _g in EMOJI_GROUPS:
+                    self._emoji_groups.append({"label": str(_g.get("label", "?")).split(" /")[0],
+                                               "items": _g.get("items", [])})
+                # 布局参数
                 cols = 10
                 cell = 36
+                rows = 7
                 self._emoji_cell = cell
                 self._emoji_cols = cols
-                cv = _tk.Canvas(win, width=cols * cell + 4, height=8 * cell + 8,
+                grid_w = cols * cell + 4
+                grid_h = rows * cell + 8
+                head_h = 30
+                tab_h = 30
+                pad = 6
+                # 宽度：页签行自然宽度 与 表情网格宽度 取大者（上限 560）
+                tf = self._emoji_tab_font
+                try:
+                    meas = _tk.Font(root=self.root, font=tf)
+                    tab_w = sum(meas.measure(g["label"]) + 18 for g in self._emoji_groups) + pad * 2
+                except Exception:
+                    tab_w = 380
+                self._emoji_size = (min(560, max(grid_w + pad * 2, tab_w)),
+                                    head_h + tab_h + grid_h + pad)
+                self._emoji_head_h = head_h
+                self._emoji_tab_h = tab_h
+                self._emoji_pad = pad
+                win.geometry(f"{self._emoji_size[0]}x{self._emoji_size[1]}")
+                # 顶栏（Canvas 绘制：标题 + 锁定按钮，点击命中检测）
+                tcv = _tk.Canvas(win, width=self._emoji_size[0], height=head_h,
+                                 bg=C("panel"), highlightthickness=0)
+                tcv.pack()
+                self._emoji_title_cv = tcv
+                tcv.bind("<Button-1>", self._on_emoji_titlebar_click)
+                # 页签行（Canvas 绘制：选中高亮，点击切换分组）
+                bcv = _tk.Canvas(win, width=self._emoji_size[0], height=tab_h,
+                                 bg=C("panel"), highlightthickness=0)
+                bcv.pack()
+                self._emoji_tab_cv = bcv
+                self._emoji_tab_btns = []  # 兼容旧引用：现由 Canvas 绘制
+                bcv.bind("<Button-1>", self._on_emoji_tabbar_click)
+                # 单个 Canvas：画当前分组全部表情
+                cv = _tk.Canvas(win, width=grid_w, height=grid_h,
                                 bg=C("panel"), highlightthickness=0)
-                cv.pack(padx=4, pady=4)
+                cv.pack(padx=pad, pady=(0, pad))
                 self._emoji_cv = cv
                 cv.bind("<Button-1>", self._on_emoji_canvas_click)
                 cv.bind("<Motion>", self._on_emoji_canvas_hover)
                 cv.bind("<Leave>", lambda e: cv.delete("emojihl"))
                 self._emoji_items = []  # (em, x, y)
                 self._emoji_drawn = -1  # 已绘制分组标记（-1 = 未绘制）
+                self._draw_emoji_titlebar()
+                self._draw_emoji_tabs()
                 win.bind("<Escape>", lambda e: self._close_emoji_panel())
                 win.bind("<FocusOut>", lambda e: self._on_emoji_focus_out())
                 win.bind("<FocusIn>", lambda e: self._on_emoji_focus_in())
-                # 给窗口显式设置尺寸（避免默认宽度），并记录为缓存尺寸：之后显示用它定位
-                try:
-                    self._emoji_size = (cols * cell + 16, 8 * cell + 96)
-                    win.geometry(f"{self._emoji_size[0]}x{self._emoji_size[1]}")
-                    win.update_idletasks()
-                except Exception:
-                    self._emoji_size = (380, 300)
                 win.withdraw()
             except Exception:
                 try:
@@ -5899,8 +5917,14 @@ class ChatApp:
             self._emoji_opened_at = time.time()  # 刚打开瞬间的焦点抖动不视为"点到外部"
             win.deiconify()
             win.attributes("-topmost", True)
-            # 用创建时记录的真实尺寸定位，弹出在情绪按钮右上方（贴近输入区）
-            w, h = getattr(self, "_emoji_size", None) or (400, 320)
+            # 定位：以面板真实渲染尺寸计算（不再用可能失真的缓存值），
+            # 优先弹在 😊 按钮上方并右侧对齐，四边做屏幕边界检测，任何屏幕尺寸下都完整可见。
+            try:
+                win.update_idletasks()
+                w = max(240, win.winfo_reqwidth())
+                h = max(220, win.winfo_reqheight())
+            except Exception:
+                w, h = getattr(self, "_emoji_size", None) or (380, 360)
             try:
                 bx = self.emoji_btn.winfo_rootx()
                 by = self.emoji_btn.winfo_rooty()
@@ -5909,13 +5933,24 @@ class ChatApp:
                 bx = self.root.winfo_rootx() + self.root.winfo_width() - w - 24
                 by = self.root.winfo_rooty() + self.root.winfo_height() - h - 130
                 bw = 0
-            x = bx + bw - w
-            y = by - h - 8
-            if y < 0:
-                y = by + 40
-            if x < 0:
-                x = 0
-            win.geometry(f"{w}x{h}+{int(x)}+{int(y)}")
+            # 屏幕工作区（Windows 下扣除任务栏）
+            try:
+                sw = win.winfo_screenwidth()
+                sh = win.winfo_screenheight()
+            except Exception:
+                sw, sh = 1920, 1080
+            taskbar = 48  # 任务栏高度预估
+            x = bx + bw - w            # 右对齐按钮
+            y = by - h - 8             # 按钮上方
+            if y < 4:                  # 上方放不下 → 按钮下方
+                y = by + self.emoji_btn.winfo_height() + 8
+            if y + h > sh - taskbar:   # 下方也放不下 → 贴屏幕底部
+                y = max(4, sh - taskbar - h)
+            if x < 4:                  # 左边界
+                x = 4
+            if x + w > sw - 4:         # 右边界
+                x = max(4, sw - 4 - w)
+            win.geometry(f"{int(w)}x{int(h)}+{int(x)}+{int(y)}")
             self._emoji_hidden = False
             # 绘制延后一帧：先显示空面板，表情后台逐步绘制，开启不卡
             if getattr(self, "_emoji_drawn", -1) != getattr(self, "_emoji_group_idx", 0):
@@ -6028,11 +6063,7 @@ class ChatApp:
         self._cancel_emoji_focus_after()
         self._emoji_locked = not getattr(self, "_emoji_locked", False)
         try:
-            btn = getattr(self, "_emoji_lock_btn", None)
-            if btn is not None:
-                btn.configure(text=("🔒" if self._emoji_locked else "🔓"),
-                              fg_color=(C("accent") if self._emoji_locked else C("input_bg")),
-                              text_color=("#ffffff" if self._emoji_locked else C("text_2")))
+            self._draw_emoji_titlebar()  # 重绘锁图标（Canvas 顶栏）
         except Exception:
             pass
         self._set_status("表情面板已锁定，可连续插入多个表情" if self._emoji_locked
@@ -6072,18 +6103,103 @@ class ChatApp:
         except Exception:
             pass
 
+    def _draw_emoji_titlebar(self):
+        """Canvas 绘制面板顶栏：左侧标题，右侧锁定按钮（圆角胶囊）。"""
+        try:
+            tcv = getattr(self, "_emoji_title_cv", None)
+            if tcv is None:
+                return
+            tcv.delete("all")
+            w = tcv.winfo_width()
+            if w <= 1:
+                w = getattr(self, "_emoji_size", (380, 360))[0]
+            h = tcv.winfo_height()
+            if h <= 1:
+                h = getattr(self, "_emoji_head_h", 30)
+            tcv.create_text(10, h // 2, text="😊 表情（点击外部关闭）",
+                            font=self._emoji_title_font, fill=C("text_mute"), anchor="w")
+            # 锁定按钮：右侧圆角胶囊
+            self._emoji_lock_box = (w - 64, 4, w - 8, h - 4)
+            x1, y1, x2, y2 = self._emoji_lock_box
+            locked = getattr(self, "_emoji_locked", False)
+            tcv.create_rectangle(x1, y1, x2, y2,
+                                 fill=(C("accent") if locked else C("input_bg")),
+                                 outline="", width=0)
+            tcv.create_text((x1 + x2) // 2, (y1 + y2) // 2,
+                            text=("🔒" if locked else "🔓"),
+                            font=(FONT, 10),
+                            fill=("#ffffff" if locked else C("text_2")))
+        except Exception:
+            pass
+
+    def _on_emoji_titlebar_click(self, event):
+        """顶栏点击：命中锁定按钮区域则切换锁定状态。"""
+        try:
+            box = getattr(self, "_emoji_lock_box", None)
+            if box and box[0] <= event.x <= box[2] and box[1] <= event.y <= box[3]:
+                self._toggle_emoji_lock()
+        except Exception:
+            pass
+
+    def _draw_emoji_tabs(self):
+        """Canvas 绘制分类页签：选中组画 accent 圆角胶囊，其余平铺。"""
+        try:
+            bcv = getattr(self, "_emoji_tab_cv", None)
+            if bcv is None:
+                return
+            bcv.delete("all")
+            groups = getattr(self, "_emoji_groups", None) or []
+            w = bcv.winfo_width()
+            if w <= 1:
+                w = getattr(self, "_emoji_size", (380, 360))[0]
+            h = bcv.winfo_height()
+            if h <= 1:
+                h = getattr(self, "_emoji_tab_h", 30)
+            try:
+                import tkinter.font as _tkfont
+                meas = _tkfont.Font(root=self.root, font=self._emoji_tab_font)
+            except Exception:
+                meas = None
+            x = getattr(self, "_emoji_pad", 6)
+            gi = getattr(self, "_emoji_group_idx", 0)
+            self._emoji_tab_boxes = []
+            for i, g in enumerate(groups):
+                try:
+                    tw = meas.measure(g["label"]) if meas else len(g["label"]) * 12
+                except Exception:
+                    tw = len(g["label"]) * 12
+                bw = tw + 16
+                if x + bw > w - 4:
+                    break  # 超宽截断（分组过多时保面板宽度稳定）
+                sel = (i == gi)
+                if sel:
+                    bcv.create_rectangle(x, 3, x + bw, h - 3,
+                                         fill=C("accent"), outline="", width=0)
+                bcv.create_text(x + bw // 2, h // 2, text=g["label"],
+                                font=self._emoji_tab_font,
+                                fill=("#ffffff" if sel else C("text")))
+                self._emoji_tab_boxes.append((x, 0, x + bw, h, i))
+                x += bw + 2
+        except Exception:
+            pass
+
+    def _on_emoji_tabbar_click(self, event):
+        """页签点击命中检测：点到哪个分组就切换到哪个。"""
+        try:
+            for x1, y1, x2, y2, gi in getattr(self, "_emoji_tab_boxes", []) or []:
+                if x1 <= event.x <= x2:
+                    self._switch_emoji_group(gi)
+                    return
+        except Exception:
+            pass
+
     def _switch_emoji_group(self, gi):
         """切换表情分类页签：仅重绘 Canvas 文本，毫秒级。"""
         try:
             self._cancel_emoji_focus_after()  # 点页签是面板内交互，绝不关闭面板
             self._emoji_group_idx = gi
+            self._draw_emoji_tabs()
             self._draw_emoji_group(gi)
-            for i, tb in enumerate(getattr(self, "_emoji_tab_btns", []) or []):
-                try:
-                    tb.configure(fg_color=(C("accent") if i == gi else C("input_bg")),
-                                 text_color=("#ffffff" if i == gi else C("text")))
-                except Exception:
-                    pass
         except Exception:
             pass
 

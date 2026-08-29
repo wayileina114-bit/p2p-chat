@@ -17,6 +17,9 @@ downloads/
 
 # 临时诊断文件
 _diag*.py
+_dbg*.py
+_verify*.py
+_repro*.py
 _smoke*.py
 _icon_preview.png
 build_stderr.txt
@@ -24,6 +27,9 @@ build_stdout.txt
 iscc_err.txt
 iscc_out.txt
 _exe_icon.png
+smoke_run.log
+smoke_out*.txt
+smoke_err.txt
 
 # 系统 / 编辑器
 Thumbs.db

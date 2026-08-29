@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3070,6 +3070,7 @@ class ChatApp:
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._dnd = False              # 免打扰（静音通知+提示音）
         self._ghost = False             # 隐身模式（不广播在线状态，仍可收发消息）
+        self._pin_var = tk.BooleanVar(value=bool(_load_settings().get("pin_window", False)))  # 窗口置顶
         self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms}
         self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
@@ -3390,6 +3391,17 @@ class ChatApp:
                                         text_color=C("text_2"), font=(FONT, 13),
                                         command=self._toggle_theme)
         self.theme_btn.pack(side="right", padx=(0, 6), pady=10)
+        self.pin_btn = ctk.CTkButton(top, text="📌", width=38, height=30, corner_radius=8,
+                                       fg_color=(C("accent") if self._pin_var.get() else C("input_bg")),
+                                       hover_color=C("input_hover"),
+                                       text_color=C("text_2"), font=(FONT, 13),
+                                       command=self._toggle_pin_window)
+        self.pin_btn.pack(side="right", padx=(0, 6), pady=10)
+        try:
+            if self._pin_var.get():
+                self.root.attributes("-topmost", True)
+        except Exception:
+            pass
         self.dnd_btn = ctk.CTkButton(top, text=("🔕" if self._dnd else "🔔"),
                                        width=38, height=30, corner_radius=8,
                                        fg_color=C("input_bg"), hover_color=C("input_hover"),
@@ -3436,11 +3448,18 @@ class ChatApp:
                       fg_color=C("input_bg"), hover_color=C("accent_hover"),
                       text_color=C("text"), font=(FONT, 13),
                       command=self._open_dm_dialog).pack(side="left", padx=(0, 6))
-        ctk.CTkEntry(srow, textvariable=self.search_var, height=32,
-                     corner_radius=R(8), border_width=0, fg_color=C("input_bg"),
-                     text_color=C("text"), placeholder_text_color=C("text_mute"),
-                     placeholder_text="搜索会话 / 成员",
-                     font=(FONT, 12)).pack(side="left", fill="x", expand=True)
+        self.search_entry = ctk.CTkEntry(srow, textvariable=self.search_var, height=32,
+                                       corner_radius=R(8), border_width=0, fg_color=C("input_bg"),
+                                       text_color=C("text"), placeholder_text_color=C("text_mute"),
+                                       placeholder_text="搜索会话 / 成员",
+                                       font=(FONT, 12))
+        self.search_entry.pack(side="left", fill="x", expand=True)
+        # 一键清空搜索（有内容时显示 ✕，Web 式快捷交互）
+        self.search_clear_btn = ctk.CTkButton(srow, text="✕", width=24, height=24, corner_radius=12,
+                                              fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                              text_color=C("text_2"), font=(FONT, 10),
+                                              command=self._clear_session_search)
+        self.search_clear_btn.pack(side="left", padx=(4, 0))
         self.session_frame = ctk.CTkScrollableFrame(left, fg_color="transparent")
         self.session_frame.pack(fill="both", expand=True, padx=6, pady=(0, 8))
 
@@ -3559,8 +3578,9 @@ class ChatApp:
         self.voice_btn.bind("<ButtonPress-1>", lambda e: self._start_voice())
         self.voice_btn.bind("<ButtonRelease-1>", lambda e: self._stop_voice())
 
-        # 输入框
-        self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=0,
+        # 输入框（聚焦时显示主题色发光边框，QQ/Discord 式反馈）
+        self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=1,
+                                        border_color=C("input_bg"),
                                         fg_color=C("input_bg"), text_color=C("text_mute"),
                                         font=(FONT, max(11, self._chat_font_size - 1)), wrap="word")
         self._input_focused = False
@@ -3949,6 +3969,11 @@ class ChatApp:
         try:
             on = bool(self._pin_var.get())
             self.root.attributes("-topmost", on)
+            _update_settings("pin_window", on)
+            try:
+                self.pin_btn.configure(fg_color=(C("accent") if on else C("input_bg")))
+            except Exception:
+                pass
             self._set_status("已置顶窗口（始终在最前）" if on else "已取消窗口置顶", "ok")
         except Exception:
             pass
@@ -4106,6 +4131,15 @@ class ChatApp:
             pass
 
     # --------------------------- 搜索防抖 ---------------------------
+
+    def _clear_session_search(self):
+        """一键清空会话/成员搜索框。"""
+        try:
+            self.search_var.set("")
+            self._apply_session_list()
+            self._set_status("已清空搜索", "mute")
+        except Exception:
+            pass
 
     def _schedule_session_refresh(self):
         if self._search_after is not None:
@@ -4773,12 +4807,15 @@ class ChatApp:
             return None
 
     def _session_last_ts(self, s):
-        """会话最后一条消息的时间戳（QQ 式按最近活跃排序用）。"""
+        """会话最后一条消息的时间戳（QQ 式按最近活跃排序用）。
+
+        消息始终按追加顺序存储（_append_message 尾部追加、历史加载按时间序），
+        因此最后一条即最新：直接取尾部 O(1)，避免每次列表重建全量 max() 扫描。"""
         msgs = s.get("messages") or []
         if not msgs:
             return 0.0
         try:
-            return max(float(m.get("ts") or 0) for m in msgs)
+            return float(msgs[-1].get("ts") or 0)
         except Exception:
             return 0.0
 
@@ -4790,6 +4827,13 @@ class ChatApp:
         for w in self.session_frame.winfo_children():
             w.destroy()
         kw = (self.search_var.get() or "").strip().lower()
+        try:
+            if kw:
+                self.search_clear_btn.pack(side="left", padx=(4, 0))
+            else:
+                self.search_clear_btn.pack_forget()
+        except Exception:
+            pass
         dm_cids = {s["cid"] for s in self._sessions.values() if s["kind"] == "dm" and s["cid"]}
 
         groups = sorted([r for r in self._rooms if (not kw) or kw in r.lower()],
@@ -5380,10 +5424,11 @@ class ChatApp:
             self.input_box.delete("1.0", "end")
             self.input_box.configure(text_color=C("text"))
             self._hint_active = False
-        # 聚焦高亮：工具钮与发送钮点亮（Web 式反馈）
+        # 聚焦高亮：工具钮与发送钮点亮（Web 式反馈）+ 输入框主题色发光边框
         try:
             self.emoji_btn.configure(fg_color=C("selected_bg"))
             self.send_btn.configure(fg_color=C("accent_hover"))
+            self.input_box.configure(border_color=C("accent"))
         except Exception:
             pass
 
@@ -5391,6 +5436,7 @@ class ChatApp:
         try:
             self.emoji_btn.configure(fg_color=C("input_bg"))
             self.send_btn.configure(fg_color=C("accent"))
+            self.input_box.configure(border_color=C("input_bg"))
         except Exception:
             pass
         if not self.input_box.get("1.0", "end").strip():

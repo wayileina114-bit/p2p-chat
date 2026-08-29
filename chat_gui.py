@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -6405,12 +6405,12 @@ class ChatApp:
             self._mid_index.pop(s.get("key"), None)
             self._unread_total -= s.get("unread", 0)
             s["unread"] = 0
-        if self._unread_total < 0:
-            self._unread_total = 0
             if s["kind"] == "group":
                 _delete_group_history(s["room"])
             else:
                 _delete_dm_history(s["cid"])
+        if self._unread_total < 0:
+            self._unread_total = 0
         self._render_feed()
         self._apply_session_list()
         self._set_status("已清空所有会话记录", "ok")
@@ -6568,6 +6568,24 @@ class ChatApp:
         text = self.input_box.get("1.0", "end").strip()
         if not text:
             return
+        # 粘贴 p2pchat://msg/会话#mid 链接：识别并自动跳转到对应消息（不当作文字发出）
+        if text.startswith("p2pchat://msg/") and "#" in text:
+            try:
+                rest = text[len("p2pchat://msg/"):]
+                room_part, _, mid_part = rest.rpartition("#")
+                if room_part and mid_part:
+                    for k, s in self._sessions.items():
+                        target_room = s.get("room") if s["kind"] == "group" else s.get("cid")
+                        if target_room == room_part and s.get("kind") in ("group", "dm"):
+                            self.input_box.delete("1.0", "end")
+                            self._switch_to(k)
+                            self._jump_to_message(mid_part)
+                            self._set_status("已定位到消息链接指向的消息", "ok")
+                            return
+                    self._set_status(f"未找到会话 {room_part}（先加入该房间）", "err")
+                    return
+            except Exception:
+                pass
         if not (self.backend and self.backend.online):
             self._show_system("尚未连接，无法发送。")
             return
@@ -7831,9 +7849,16 @@ class ChatApp:
                           "mid": mid or None}
         for w in self.reply_bar.winfo_children():
             w.destroy()
+        try:
+            self.reply_bar.configure(fg_color=C("warn_bg"), corner_radius=10)
+        except Exception:
+            pass
+        # 左侧 accent 竖条（QQ 引用块样式）
+        ctk.CTkFrame(self.reply_bar, width=3, height=30, corner_radius=2,
+                     fg_color=C("accent")).pack(side="left", padx=(10, 8), pady=8)
         ctk.CTkLabel(self.reply_bar, text=f"↩ 回复 {self._reply_to['name']}：{self._reply_to['text']}",
                      text_color=C("warn_text"), font=(FONT, 10), anchor="w",
-                     justify="left", wraplength=480).pack(side="left", padx=10, pady=6)
+                     justify="left", wraplength=480).pack(side="left", pady=8)
         ctk.CTkButton(self.reply_bar, text="✕", width=24, height=24, corner_radius=8,
                       fg_color="transparent", text_color=C("warn_text"),
                       hover_color=C("input_hover"), font=(FONT, 11),
@@ -8501,6 +8526,26 @@ class ChatApp:
             body = ctk.CTkScrollableFrame(win, fg_color="transparent")
             body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
             shown = False
+            # 元信息：发送者 / 时间 / 状态
+            try:
+                _who = str(m.get("name", "?")) + ("（我）" if m.get("mine") else "")
+                _when = _fmt_full_time(m.get("ts")) if m.get("ts") else ""
+                _extra = []
+                if m.get("edited"):
+                    _extra.append("已编辑")
+                if m.get("recalled"):
+                    _extra.append("已撤回")
+                if m.get("pinned"):
+                    _extra.append("置顶")
+                meta = f"{_who} · {_when}" + (" · " + " / ".join(_extra) if _extra else "")
+                ctk.CTkLabel(body, text=meta, anchor="w", justify="left",
+                             wraplength=290, font=(FONT, 10, "bold"),
+                             text_color=C("text_2")).pack(anchor="w", pady=(0, 4))
+                if m.get("mid"):
+                    ctk.CTkLabel(body, text=f"ID: {m['mid'][:16]}…", anchor="w",
+                                 font=(FONT, 9), text_color=C("text_mute")).pack(anchor="w", pady=(0, 2))
+            except Exception:
+                pass
             rb = m.get("read_by") or []
             if rb:
                 shown = True
@@ -9137,7 +9182,12 @@ class ChatApp:
             if mid:
                 menu.add_command(label="复制消息链接",
                                  command=lambda: self._copy_msg_link(mid))
-            menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
+                menu.add_command(label="ℹ 消息详情",
+                                 command=lambda: self._show_message_details(mid))
+            # 转发：文件消息带文件路径，文字消息带文本（修复文件消息转发丢失文件）
+            _fwd_items = [{"type": "file", "path": file_path,
+                            "label": os.path.basename(file_path)}] if (file_path and os.path.isfile(file_path)) else text
+            menu.add_command(label="转发", command=lambda: self._forward_dialog(_fwd_items))
             menu.add_command(label="多选转发…", command=self._start_multi_select)
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text, mid))
             if mid:

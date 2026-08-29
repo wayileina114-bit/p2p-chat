@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3383,7 +3383,8 @@ class ChatApp:
                       hover_color=C("input_hover"), font=(FONT, 12),
                       command=self._close_search).pack(side="left", padx=(0, 16))
 
-        self.feed = ctk.CTkScrollableFrame(right, fg_color="transparent", corner_radius=0)
+        # 消息流背景与聊天卡片同色（CTkScrollableFrame 的 transparent 不会透出底色）
+        self.feed = ctk.CTkScrollableFrame(right, fg_color=C("panel_2"), corner_radius=0)
         self.feed.pack(fill="both", expand=True, padx=6, pady=2)
         # 滚到顶部自动加载更早历史（聊天软件标配交互）
         try:

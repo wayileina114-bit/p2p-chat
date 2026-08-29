@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -8755,6 +8755,17 @@ class ChatApp:
             body = ctk.CTkScrollableFrame(win, fg_color="transparent")
             body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
             shown = False
+            # 正文预览 + 复制按钮
+            _mtxt = str(m.get("text", "") or "").strip()
+            if _mtxt:
+                ctk.CTkLabel(body, text=_mtxt[:120], anchor="w", justify="left",
+                             wraplength=290, font=(FONT, 11), text_color=C("text")).pack(
+                    anchor="w", pady=(0, 4))
+                ctk.CTkButton(body, text="📋 复制正文", width=90, height=24, corner_radius=6,
+                              fg_color=C("input_bg"), text_color=C("text_2"),
+                              hover_color=C("input_hover"), font=(FONT, 10),
+                              command=lambda t=_mtxt: self._copy_to_clipboard(t)).pack(
+                    anchor="w", pady=(0, 6))
             # 元信息：发送者 / 时间 / 状态
             try:
                 _who = str(m.get("name", "?")) + ("（我）" if m.get("mine") else "")
@@ -9822,6 +9833,12 @@ class ChatApp:
     def _scroll_to_mid(self, mid):
         """滚动到指定消息并高亮（引用跳转 / 搜索命中导航共用）。"""
         try:
+            # 目标不在渲染范围（折叠区外）：先展开全部历史再定位
+            if mid not in self._bubble_frames and not self._history_expanded:
+                self._history_expanded = True
+                self._render_feed()
+                self.root.after(60, lambda m=mid: self._scroll_to_mid(m))
+                return
             canvas = self.feed._parent_canvas
             canvas.update_idletasks()
             canvas.configure(scrollregion=canvas.bbox("all"))

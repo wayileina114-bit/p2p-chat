@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2982,6 +2982,9 @@ class ChatApp:
             view_menu = tk.Menu(menubar, tearoff=0)
             view_menu.add_command(label="深色主题", command=lambda: self._set_theme("dark"))
             view_menu.add_command(label="浅色主题", command=lambda: self._set_theme("light"))
+            self._pin_var = tk.BooleanVar(value=False)
+            view_menu.add_checkbutton(label="窗口置顶", variable=self._pin_var,
+                                      command=self._toggle_pin_window)
             menubar.add_cascade(label="视图", menu=view_menu)
             settings_menu = tk.Menu(menubar, tearoff=0)
             settings_menu.add_command(label="设置中心…", command=self._open_settings)
@@ -3154,6 +3157,15 @@ class ChatApp:
         except Exception:
             nxt = "dark"
         self._set_theme(nxt)
+
+    def _toggle_pin_window(self):
+        """窗口置顶开关：置顶后窗口始终在最前（多任务/看视频时方便）。"""
+        try:
+            on = bool(self._pin_var.get())
+            self.root.attributes("-topmost", on)
+            self._set_status("已置顶窗口（始终在最前）" if on else "已取消窗口置顶", "ok")
+        except Exception:
+            pass
 
     def _toggle_dnd(self):
         """免打扰开关：一键静音通知 + 提示音。"""
@@ -3757,7 +3769,9 @@ class ChatApp:
             n = sum(1 for p in self._peers.values() if s["room"] in (p.get("rooms") or []))
             self.chat_title.configure(text=f"🌸 群聊 · {s['name']}（{n}人在线）")
         else:
-            self.chat_title.configure(text=f"💌 私聊 · {s['name']}")
+            online = s.get("online") or s.get("cid") in self._peers
+            dot = "🟢" if online else "⚪"
+            self.chat_title.configure(text=f"{dot} 私聊 · {s['name']}")
 
     def _toggle_members(self):
         """展开 / 收起当前会话的成员列表。"""
@@ -3850,21 +3864,25 @@ class ChatApp:
                      and ((not kw) or kw in c["name"].lower())]
         total = len(groups) + len(dms) + len(online_others) + len(favorites)
         if favorites:
-            self._add_section_header("★ 收藏")
-            for c in favorites:
-                self._add_contact_item(c)
+            self._add_section_header("★ 收藏", "fav")
+            if not self._is_group_collapsed("fav"):
+                for c in favorites:
+                    self._add_contact_item(c)
         if groups:
-            self._add_section_header("群聊")
-            for r in groups:
-                self._add_group_item(r)
+            self._add_section_header("群聊", "groups")
+            if not self._is_group_collapsed("groups"):
+                for r in groups:
+                    self._add_group_item(r)
         if dms:
-            self._add_section_header("私聊")
-            for s in dms:
-                self._add_dm_item(s)
+            self._add_section_header("私聊", "dms")
+            if not self._is_group_collapsed("dms"):
+                for s in dms:
+                    self._add_dm_item(s)
         if online_others:
-            self._add_section_header("在线成员")
-            for cid, name in sorted(online_others, key=lambda x: x[1]):
-                self._add_member_item(cid, name)
+            self._add_section_header("在线成员", "online")
+            if not self._is_group_collapsed("online"):
+                for cid, name in sorted(online_others, key=lambda x: x[1]):
+                    self._add_member_item(cid, name)
 
         if total == 0 and not kw:
             ctk.CTkLabel(self.session_frame, text="（暂无会话，先在上方加入房间）",
@@ -3873,9 +3891,35 @@ class ChatApp:
             ctk.CTkLabel(self.session_frame, text="（无匹配）",
                          text_color=C("text_mute"), font=(FONT, 10)).pack(anchor="w", padx=10, pady=8)
 
-    def _add_section_header(self, text):
-        ctk.CTkLabel(self.session_frame, text=text, text_color=C("section"),
-                     font=(FONT, 10, "bold"), anchor="w").pack(fill="x", padx=6, pady=(10, 2))
+    def _collapsed_groups(self):
+        """会话分组折叠状态（存会话对象，避免读盘）。"""
+        if not hasattr(self, "_collapsed"):
+            self._collapsed = set()
+        return self._collapsed
+
+    def _toggle_group_collapse(self, key):
+        """点击分组标题：折叠 / 展开该分组。"""
+        c = self._collapsed_groups()
+        if key in c:
+            c.discard(key)
+        else:
+            c.add(key)
+        self._apply_session_list()
+
+    def _is_group_collapsed(self, key):
+        return key in self._collapsed_groups()
+
+    def _add_section_header(self, text, group_key=""):
+        """分组标题（可点击折叠/展开）。"""
+        collapsed = bool(group_key) and self._is_group_collapsed(group_key)
+        arrow = ("▶ " if collapsed else "▼ ") if group_key else ""
+        lbl = ctk.CTkLabel(self.session_frame, text=arrow + text,
+                           text_color=C("section"),
+                           font=(FONT, 10, "bold"), anchor="w",
+                           cursor=("hand2" if group_key else ""))
+        lbl.pack(fill="x", padx=6, pady=(10, 2))
+        if group_key:
+            lbl.bind("<Button-1>", lambda e, k=group_key: self._toggle_group_collapse(k))
 
     def _session_avatar(self, parent, name, is_group=False, size=26):
         """会话列表圆形首字母头像（Discord/QQ 风格）：群聊显示 #，私聊显示昵称首字母。"""
@@ -4588,10 +4632,16 @@ class ChatApp:
             menu = tk.Menu(self.root, tearoff=0)
             muted = self._is_muted(key)
             pinned = self._is_pinned_session(key)
+            room = self._sessions.get(key, {}).get("room", "") if self._sessions.get(key) else ""
             menu.add_command(label=("取消置顶" if pinned else "置顶会话"),
                              command=lambda: self._toggle_pin_session(key))
             menu.add_command(label=("取消静音" if muted else "静音会话"),
                              command=lambda: self._toggle_mute(key))
+            menu.add_separator()
+            menu.add_command(label="清空记录", command=self._clear_current_history)
+            if room:
+                menu.add_command(label=f"删除并退出「{room}」",
+                                 command=lambda r=room: self._remove_room(r))
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             try:
@@ -7633,11 +7683,11 @@ def _set_window_icon(root):
             from PIL import Image as _PIL
             import tkinter as _tk
             img = _PIL.open(ico)
-            # 取一个适中尺寸的帧转 PNG，iconphoto 接受 PhotoImage
+            # 用 32px 帧（任务栏标准清晰尺寸）转 PNG，iconphoto 设置标题栏+任务栏
             try:
                 img.seek(0)
                 img = img.convert("RGBA")
-                img.thumbnail((64, 64))
+                img.thumbnail((32, 32), _PIL.LANCZOS)
             except Exception:
                 pass
             import io as _io

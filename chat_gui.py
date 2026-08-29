@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -2861,8 +2861,9 @@ class ChatApp:
         self.title_row = ctk.CTkFrame(right, fg_color="transparent")
         self.title_row.pack(fill="x", padx=16, pady=(14, 2))
         self.chat_title = ctk.CTkLabel(self.title_row, text="群聊", font=(FONT, 13, "bold"),
-                                       text_color=C("text"), anchor="w")
+                                       text_color=C("text"), anchor="w", cursor="hand2")
         self.chat_title.pack(side="left", fill="x", expand=True)
+        self.chat_title.bind("<Double-Button-1>", lambda e: self._copy_current_chat_id())
         self.members_btn = ctk.CTkButton(self.title_row, text="👥 成员", width=74, height=26,
                                          corner_radius=8, font=(FONT, 11),
                                          fg_color=C("input_bg"), text_color=C("text_2"),
@@ -2888,6 +2889,14 @@ class ChatApp:
 
         self.feed = ctk.CTkScrollableFrame(right, fg_color="transparent", corner_radius=0)
         self.feed.pack(fill="both", expand=True, padx=6, pady=2)
+        # 滚到顶部自动加载更早历史（聊天软件标配交互）
+        try:
+            canvas = self.feed._parent_canvas
+            canvas.bind("<MouseWheel>", self._on_feed_wheel)
+            canvas.bind("<Button-4>", self._on_feed_wheel)
+            canvas.bind("<Button-5>", self._on_feed_wheel)
+        except Exception:
+            pass
         if _DND_READY:
             try:
                 self.feed.drop_target_register(DND_FILES)
@@ -3360,6 +3369,25 @@ class ChatApp:
             self._set_status("头像已更新", "ok")
         else:
             messagebox.showerror("头像", "读取该图片失败，请换一张试试。")
+
+    def _copy_current_chat_id(self):
+        """双击聊天标题：复制当前会话的标识（群聊复制房间名、私聊复制对方 ID）。"""
+        try:
+            s = self._sessions.get(self._current)
+            if s is None:
+                return
+            if s["kind"] == "group":
+                val = s.get("room", "")
+                tip = "已复制房间名：" + str(val)
+            else:
+                val = s.get("cid", "")
+                tip = "已复制对方 ID：" + str(val)
+            if val:
+                self.root.clipboard_clear()
+                self.root.clipboard_append(str(val))
+                self._set_status(tip, "ok")
+        except Exception:
+            pass
 
     def _copy_my_id(self):
         try:
@@ -6575,6 +6603,51 @@ class ChatApp:
 
     def _expand_history(self):
         self._history_expanded = True
+        self._render_feed()
+
+    def _on_feed_wheel(self, event):
+        """滚轮事件：向上滚到顶部时触发加载更早历史（防抖 150ms）。"""
+        try:
+            delta = getattr(event, "delta", 0)
+            num = getattr(event, "num", 0)
+            if delta > 0 or num == 4:  # 向上滚
+                if self._at_top() and not self._history_expanded:
+                    if getattr(self, "_older_after", None) is not None:
+                        try:
+                            self.root.after_cancel(self._older_after)
+                        except Exception:
+                            pass
+                    self._older_after = self.root.after(150, self._maybe_load_older)
+        except Exception:
+            pass
+
+    def _at_top(self):
+        """当前是否滚到顶部（用于自动加载更早历史）。"""
+        try:
+            canvas = self.feed._parent_canvas
+            top, _bottom = canvas.yview()
+            return float(top) <= 0.02
+        except Exception:
+            return False
+
+    def _maybe_load_older(self):
+        """滚到顶部时自动加载更早消息（已展开则无事可做）。"""
+        if self._history_expanded:
+            return
+        s = self._sessions.get(self._current)
+        if s is None or self._search_query:
+            return
+        if len(s["messages"]) <= self.RENDER_MAX:
+            return
+        if not self._at_top():
+            return
+        # 抬高渲染上限，重渲染并保持顶部位置
+        self._history_expanded = True
+        try:
+            canvas = self.feed._parent_canvas
+            canvas.yview_moveto(0.0)
+        except Exception:
+            pass
         self._render_feed()
 
     def _schedule_feed_refresh(self):

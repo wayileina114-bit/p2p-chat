@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.4"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -9468,15 +9468,19 @@ class ChatApp:
             self._multi_count_lbl = ctk.CTkLabel(bar, text="已选 0 条（点击消息勾选）",
                                                  text_color=C("text"), font=(FONT, 11))
             self._multi_count_lbl.pack(side="left", padx=10, pady=6)
-            ctk.CTkButton(bar, text="→ 转发", width=70, height=28, corner_radius=8,
-                          fg_color=C("accent"), hover_color=C("accent_hover"),
-                          font=(FONT, 11, "bold"), command=self._finish_multi_forward).pack(side="right", padx=(0, 8), pady=5)
+            # 转发按钮初始禁用（未选消息时置灰）
+            self._multi_fwd_btn = ctk.CTkButton(bar, text="→ 转发", width=70, height=28, corner_radius=8,
+                                                fg_color=C("input_bg"), text_color=C("text_mute"),
+                                                hover_color=C("input_hover"),
+                                                font=(FONT, 11, "bold"), command=self._finish_multi_forward)
+            self._multi_fwd_btn.pack(side="right", padx=(0, 8), pady=5)
             ctk.CTkButton(bar, text="取消", width=60, height=28, corner_radius=8,
                           fg_color=C("input_bg"), text_color=C("text_2"),
                           hover_color=C("input_hover"), font=(FONT, 11),
                           command=self._exit_multi_select).pack(side="right", padx=6, pady=5)
+            self.root.bind("<Escape>", self._on_multi_esc, add="+")
             self._render_feed()  # 重渲染：气泡可点击勾选
-            self._set_status("多选转发模式：点击消息勾选，再点“→ 转发”", "accent")
+            self._set_status("多选转发模式：点击消息勾选，再点“→ 转发”（Esc 取消）", "accent")
         except Exception:
             self._exit_multi_select()
 
@@ -9496,6 +9500,14 @@ class ChatApp:
                     pass
             try:
                 self._multi_count_lbl.configure(text=f"\u5df2\u9009 {len(self._multi_selected)} \u6761\uff08\u70b9\u51fb\u6d88\u606f\u52fe\u9009\uff09")
+            except Exception:
+                pass
+            n = len(self._multi_selected)
+            try:
+                self._multi_fwd_btn.configure(
+                    fg_color=(C("accent") if n else C("input_bg")),
+                    text_color=("#ffffff" if n else C("text_mute")),
+                    hover_color=(C("accent_hover") if n else C("input_hover")))
             except Exception:
                 pass
         except Exception:
@@ -9530,12 +9542,22 @@ class ChatApp:
         except Exception:
             self._exit_multi_select()
 
+    def _on_multi_esc(self, event=None):
+        """多选模式 Esc 退出。"""
+        if getattr(self, "_multi_mode", False):
+            self._exit_multi_select()
+        return "break"
+
     def _exit_multi_select(self):
         """退出多选模式，清理工具栏。"""
         try:
             self._multi_mode = False
             self._multi_selected = []
             self._multi_frames = {}
+            try:
+                self.root.unbind("<Escape>", self._on_multi_esc)
+            except Exception:
+                pass
             bar = getattr(self, "_multi_bar", None)
             if bar is not None:
                 try:

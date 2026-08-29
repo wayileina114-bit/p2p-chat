@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.4.3"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3048,6 +3048,16 @@ class ChatApp:
         self.root.minsize(820, 560)
         self.root.configure(fg_color=C("app_bg"))
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+        # Web 端风格：隐藏系统标题栏，改用自绘标题栏（见 _build_titlebar）
+        self._custom_titlebar = True
+        self._maximized = False
+        self._restore_geo = None
+        try:
+            self.root.overrideredirect(False)
+            self.root.attributes("-toolwindow", True)  # 去系统标题栏，保留任务栏/缩放
+        except Exception:
+            self._custom_titlebar = False
+        self.root.after(60, self._fix_taskbar_style)  # 窗口映射后修正任务栏样式
 
         self._build_ui()
         self._build_menu()
@@ -3076,7 +3086,170 @@ class ChatApp:
 
     # --------------------------- UI 构建 ---------------------------
 
+    def _fix_taskbar_style(self):
+        """无边框窗口任务栏修正：去 TOOLWINDOW 加 APPWINDOW，让任务栏图标正常显示。"""
+        if not getattr(self, "_custom_titlebar", False) or os.name != "nt":
+            return
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            if not hwnd:
+                hwnd = self.root.winfo_id()
+            GWL_EXSTYLE = -20
+            style = ctypes.windll.user32.GetWindowLongPtrW(hwnd, GWL_EXSTYLE)
+            style = (style & ~0x80) | 0x40000  # ~WS_EX_TOOLWINDOW | WS_EX_APPWINDOW
+            ctypes.windll.user32.SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style)
+        except Exception:
+            pass
+
+    def _build_titlebar(self, parent):
+        """自绘标题栏（Web 端风格）：logo + 标题 + 弹性空间 + 最小化/最大化/关闭。"""
+        tb = ctk.CTkFrame(parent, corner_radius=0, height=40, fg_color=C("panel"))
+        tb.pack(fill="x")
+        tb.pack_propagate(False)
+        self._titlebar = tb
+        ctk.CTkLabel(tb, text="🌸", font=(FONT, 15)).pack(side="left", padx=(12, 4))
+        ctk.CTkLabel(tb, text="P2P 聊天", font=(FONT, 12, "bold"),
+                     text_color=C("text")).pack(side="left")
+        self._tb_title = tb.winfo_children()[-1]
+        # 弹性空间（拖拽区）
+        drag = ctk.CTkFrame(tb, fg_color="transparent")
+        drag.pack(side="left", fill="both", expand=True)
+        for w in (tb, drag):
+            w.bind("<Button-1>", self._tb_press)
+            w.bind("<B1-Motion>", self._tb_drag_move)
+            w.bind("<Double-Button-1>", lambda e: self._tb_toggle_max())
+        # 窗口控制按钮（Web 风格）
+        def _ctl(text, cmd, hover):
+            b = ctk.CTkButton(tb, text=text, width=42, height=40, corner_radius=0,
+                              fg_color="transparent", hover_color=hover,
+                              text_color=C("text_2"), font=(FONT, 13), command=cmd,
+                              border_width=0, border_spacing=0)
+            b.pack(side="right")
+            return b
+        self._btn_close = _ctl("✕", self._on_close, C("danger"))
+        self._btn_max = _ctl("▢", self._tb_toggle_max, C("hover"))
+        self._btn_min = _ctl("─", lambda: self.root.iconify(), C("hover"))
+        for b in (self._btn_close, self._btn_max, self._btn_min):
+            b.bind("<Button-1>", lambda e: "break")
+        return tb
+
+    def _tb_press(self, event):
+        """标题栏按下：记录拖拽起点（最大化时禁止拖拽）。"""
+        if self._maximized:
+            self._tb_drag = None
+            return
+        self._tb_drag = (event.x_root - self.root.winfo_x(),
+                         event.y_root - self.root.winfo_y())
+        return "break"
+
+    def _tb_drag_move(self, event):
+        """标题栏拖拽移动窗口。"""
+        if not getattr(self, "_tb_drag", None):
+            return
+        try:
+            nx = event.x_root - self._tb_drag[0]
+            ny = event.y_root - self._tb_drag[1]
+            self.root.geometry(f"+{int(nx)}+{int(ny)}")
+        except Exception:
+            pass
+        return "break"
+
+    def _tb_toggle_max(self):
+        """最大化 / 还原（手动 geometry，兼容无边框窗口）。"""
+        try:
+            if self._maximized:
+                self._maximized = False
+                if self._restore_geo:
+                    self.root.geometry(self._restore_geo)
+                try:
+                    self._btn_max.configure(text="▢")
+                except Exception:
+                    pass
+            else:
+                self._restore_geo = self.root.geometry()
+                self._maximized = True
+                sw = self.root.winfo_screenwidth()
+                sh = self.root.winfo_screenheight()
+                self.root.geometry(f"{sw}x{sh - 1}+0+0")
+                try:
+                    self._btn_max.configure(text="❐")
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _build_nav_rail(self, parent):
+        """Discord 式图标导航栏：用户头像 + 房间圆形图标 + 添加/设置。"""
+        rail = ctk.CTkFrame(parent, corner_radius=0, width=54, fg_color=C("panel"))
+        rail.pack(side="left", fill="y")
+        rail.pack_propagate(False)
+        self._nav_rail = rail
+        # 用户头像（点击个人资料卡）
+        self.nav_avatar = ctk.CTkLabel(rail, text="", width=36, height=36,
+                                       corner_radius=18, fg_color=C("input_bg"),
+                                       cursor="hand2")
+        self.nav_avatar.pack(pady=(10, 4))
+        try:
+            if self._avatar:
+                from PIL import Image as _PILImage
+                img = _PILImage.open(self._avatar)
+                img.thumbnail((36, 36))
+                from customtkinter import CTkImage as _CI
+                ctk_img = _CI(light_image=img, dark_image=img, size=(36, 36))
+                self._nav_avatar_img = ctk_img
+                self.nav_avatar.configure(image=ctk_img, text="")
+        except Exception:
+            pass
+        self.nav_avatar.bind("<Button-1>", lambda e: self._open_profile_card())
+        ctk.CTkFrame(rail, width=30, height=2, corner_radius=1,
+                     fg_color=C("hover")).pack(pady=(2, 6))
+        # 房间图标列表（滚动）
+        self.nav_rooms_frame = ctk.CTkScrollableFrame(
+            rail, width=54, fg_color="transparent", corner_radius=0)
+        self.nav_rooms_frame.pack(fill="both", expand=True)
+        # 底部：➕ 加入房间 / ⚙ 设置
+        ctk.CTkButton(rail, text="➕", width=36, height=36, corner_radius=18,
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 14),
+                      command=self._add_room_from_input).pack(pady=(4, 2))
+        ctk.CTkButton(rail, text="⚙", width=36, height=36, corner_radius=18,
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 14),
+                      command=self._open_settings).pack(pady=(2, 10))
+        self._refresh_nav_rail()
+        return rail
+
+    def _refresh_nav_rail(self):
+        """刷新导航栏房间图标（选中态高亮胶囊）。"""
+        try:
+            rail = getattr(self, "nav_rooms_frame", None)
+            if rail is None:
+                return
+            for w in rail.winfo_children():
+                w.destroy()
+            cur_room = None
+            s = self._sessions.get(self._current)
+            if s and s.get("kind") == "group":
+                cur_room = s.get("room")
+            for room in getattr(self, "_rooms", []) or []:
+                ch = (str(room)[:1].upper() or "#")
+                sel = (room == cur_room)
+                b = ctk.CTkButton(
+                    rail, text=ch, width=40, height=40, corner_radius=20,
+                    fg_color=(C("accent") if sel else C("input_bg")),
+                    hover_color=C("accent_hover"),
+                    text_color=("#ffffff" if sel else C("text")),
+                    font=(FONT, 13, "bold"),
+                    command=lambda r=room: self._switch_to(self._group_key(r)))
+                b.pack(pady=2)
+        except Exception:
+            pass
+
     def _build_ui(self):
+        # Web 端风格：自绘标题栏（无边框窗口）最顶
+        if getattr(self, "_custom_titlebar", False):
+            self._build_titlebar(self.root)
         # 顶部工具条：头像 / 昵称 / ID / 房间 / 加入 / 连接 / 主题
         top = ctk.CTkFrame(self.root, corner_radius=0, fg_color=C("panel"))
         top.pack(fill="x")
@@ -3165,8 +3338,12 @@ class ChatApp:
         body = ctk.CTkFrame(self.root, fg_color=C("app_bg"))
         body.pack(fill="both", expand=True, padx=10, pady=(0, 8))
 
+        # Web 端风格：最左图标导航栏（房间圆形图标）
+        if getattr(self, "_custom_titlebar", False):
+            self._build_nav_rail(body)
+
         # 左：会话列表
-        left = ctk.CTkFrame(body, corner_radius=12, fg_color=C("panel"), width=248)
+        left = ctk.CTkFrame(body, corner_radius=R(12), fg_color=C("panel"), width=248)
         left.pack(side="left", fill="y", padx=(0, 8))
         left.pack_propagate(False)
         self.search_var = ctk.StringVar()
@@ -3333,6 +3510,9 @@ class ChatApp:
 
     def _build_menu(self):
         try:
+            if getattr(self, "_custom_titlebar", False):
+                # Web 端风格无边框窗口：原生菜单栏不显示，功能入口整合进设置中心
+                return
             menubar = tk.Menu(self.root)
             view_menu = tk.Menu(menubar, tearoff=0)
             view_menu.add_command(label="深色主题", command=lambda: self._set_theme("dark"))
@@ -3424,7 +3604,7 @@ class ChatApp:
         try:
             win = ctk.CTkToplevel(self.root)
             win.title("设置")
-            win.geometry("430x520")
+            win.geometry("430x700")
             win.resizable(False, False)
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="设置中心", font=(FONT, 15, "bold"),
@@ -3481,6 +3661,23 @@ class ChatApp:
             ctk.CTkButton(win, text="端到端加密口令…", height=32, corner_radius=8,
                           fg_color=C("input_bg"), text_color=C("text"), hover_color=C("input_hover"),
                           font=(FONT, 12), command=self._set_encrypt_pass).pack(fill="x", padx=26, pady=6)
+
+            # 更多功能（原菜单栏入口，Web 端风格整合到设置中心）
+            ctk.CTkLabel(win, text="更多功能", font=(FONT, 11),
+                         text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(12, 2))
+            for _txt, _cmd in (
+                ("📤 导出当前会话记录（TXT）", self._export_current_history),
+                ("🌐 导出当前会话记录（网页 HTML）", self._export_current_history_html),
+                ("💾 备份全部数据…", self._backup_data),
+                ("📥 从备份恢复…", self._restore_data),
+                ("🛡 开放直连端口（需管理员）", self._open_firewall_ports),
+                ("📶 网络测速…", self._measure_network),
+                ("🔄 检查更新", self._manual_check_update),
+            ):
+                ctk.CTkButton(win, text=_txt, height=28, corner_radius=8,
+                              fg_color=C("input_bg"), text_color=C("text_2"),
+                              hover_color=C("input_hover"), font=(FONT, 11),
+                              command=_cmd).pack(fill="x", padx=26, pady=1)
 
             ctk.CTkLabel(win, text=f"P2P 聊天 · v{APP_VERSION}", font=(FONT, 10),
                          text_color=C("text_mute")).pack(pady=(10, 14))
@@ -3597,8 +3794,12 @@ class ChatApp:
         # 焦点恢复会指向已销毁的旧控件而崩溃。
         set_appearance(mode, apply_ctk=False)
         self._rebuild_ui()
+        # ctk 的 set_appearance_mode 会遍历全部控件重配外观（约 1s）——
+        # 控件刚按新主题重建过，纯属重复；异步执行不阻塞切换首屏
         try:
-            ctk.set_appearance_mode("dark" if mode in ("dark", "anime") else "light")
+            self.root.after(
+                30, lambda: ctk.set_appearance_mode(
+                    "dark" if mode in ("dark", "anime") else "light"))
         except Exception:
             pass
 
@@ -3638,6 +3839,8 @@ class ChatApp:
             overlay = tk.Frame(self.root, bg=C("app_bg"), highlightthickness=0)
             overlay.place(x=0, y=0, relwidth=1, relheight=1)
             overlay.lift()
+            tk.Label(overlay, text="🌸 正在换装…", bg=C("app_bg"), fg=C("text_mute"),
+                     font=(FONT, 12)).place(relx=0.5, rely=0.5, anchor="center")
         except Exception:
             overlay = None
         # 先释放图片引用（CTkImage 持有 Tk 图片对象，先清引用再销毁控件能显著减少释放时间）
@@ -3662,8 +3865,9 @@ class ChatApp:
         self.nick_var.set(nick or self._profile_name or "未命名")
         self._apply_session_list()
         # 主题切换期间限制首屏渲染量（历史保留，切完后自动补全），切换更快
+        # （CTk 控件创建约 30ms/条，60 条要 2s；20 条压到 0.7s 以内，剩余延迟补全）
         _saved = self.RENDER_MAX
-        self.RENDER_MAX = min(_saved, 60)
+        self.RENDER_MAX = min(_saved, 20)
         try:
             self._render_feed()
         finally:
@@ -4104,6 +4308,10 @@ class ChatApp:
             self._reset_input_hint()
         self._render_feed()
         self._apply_session_list()
+        try:
+            self._refresh_nav_rail()
+        except Exception:
+            pass
         self._update_window_title()
 
     def _open_dm_dialog(self):
@@ -4326,6 +4534,10 @@ class ChatApp:
             ctk.CTkLabel(self.session_frame, text="（无匹配）",
                          text_color=C("text_mute"), font=(FONT, 10)).pack(anchor="w", padx=10, pady=8)
         self._refresh_mention_btn()
+        try:
+            self._refresh_nav_rail()  # Web 端风格：导航栏房间图标联动
+        except Exception:
+            pass
 
     def _collapsed_groups(self):
         """会话分组折叠状态（存会话对象，避免读盘）。"""

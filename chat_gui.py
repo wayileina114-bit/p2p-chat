@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -9266,11 +9266,12 @@ class ChatApp:
             self._bind_hover(mid, bubble, _img, name=name, text=itxt, path=path)
 
     def _voice_menu(self, event, path):
-        """语音消息右键菜单：转发 / 打开位置。"""
+        """语音消息右键菜单：转发 / 打开位置 / 复制路径。"""
         try:
             menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="转发", command=lambda: self._forward_voice(path))
             menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(path))
+            menu.add_command(label="复制路径", command=lambda: self._copy_to_clipboard(path))
             menu.tk_popup(event.x_root, event.y_root)
         finally:
             try:
@@ -9299,17 +9300,20 @@ class ChatApp:
             pass
 
     def _image_menu(self, event, path):
-        """图片消息右键菜单：转发 / 保存 / 复制图片 / 打开大图 / 打开位置。"""
+        """图片消息右键菜单：转发 / 保存 / 复制图片 / 打开大图 / 打开位置 / 用画图编辑。"""
         try:
             menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
+            menu.add_command(label="查看大图", command=lambda: self._open_image(path))
+            menu.add_separator()
             menu.add_command(label="转发到…",
                              command=lambda: self._forward_dialog(
                                  [{"type": "file", "path": path,
                                    "label": os.path.basename(path)}]))
             menu.add_command(label="保存图片到本地…", command=lambda: self._save_image_dialog(path))
             menu.add_command(label="复制图片", command=lambda: self._copy_image(path))
+            if os.name == "nt":
+                menu.add_command(label="✏ 用画图编辑", command=lambda: self._edit_image_mspaint(path))
             menu.add_separator()
-            menu.add_command(label="查看大图", command=lambda: self._open_image(path))
             menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(path))
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -9317,6 +9321,16 @@ class ChatApp:
                 menu.grab_release()
             except Exception:
                 pass
+
+    def _edit_image_mspaint(self, path):
+        """用系统画图（mspaint）打开图片编辑。"""
+        try:
+            if not (path and os.path.isfile(path)):
+                return
+            import subprocess
+            subprocess.Popen(["mspaint", os.path.abspath(path)])
+        except Exception:
+            self._set_status("无法打开画图", "err")
 
     def _save_image_dialog(self, path):
         """把图片保存到用户指定位置。"""
@@ -9326,10 +9340,11 @@ class ChatApp:
                 return
             base = os.path.basename(path) or "image.png"
             name, ext = os.path.splitext(base)
+            _stamp = time.strftime("%Y%m%d_%H%M%S")
             dest = filedialog.asksaveasfilename(
                 title="保存图片",
                 defaultextension=ext or ".png",
-                initialfile=(name + (ext or ".png")))
+                initialfile=(f"{name}_{_stamp}" + (ext or ".png")))
             if not dest:
                 return
             import shutil

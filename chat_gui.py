@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -6758,6 +6758,20 @@ class ChatApp:
             self._update_send_btn_state()
         except Exception:
             pass
+        # @ 面板打开时：↑/↓ 选择、Enter 确认、Esc 关闭
+        if getattr(self, "_mention_win", None) is not None and self._mention_win.winfo_exists():
+            if event.keysym == "Down":
+                self._mention_move(1)
+                return "break"
+            if event.keysym == "Up":
+                self._mention_move(-1)
+                return "break"
+            if event.keysym == "Return":
+                self._mention_confirm()
+                return "break"
+            if event.keysym == "Escape":
+                self._close_mention_panel()
+                return "break"
         if event.keysym in ("Up", "Down", "Return", "Escape", "Left", "Right", "BackSpace"):
             return
         self._send_typing()
@@ -6772,6 +6786,33 @@ class ChatApp:
                 self._close_mention_panel()
                 return
             self._open_mention_panel(partial)
+        except Exception:
+            pass
+
+    def _mention_move(self, delta):
+        """@ 面板 ↑/↓ 选择：高亮切换。"""
+        try:
+            btns = getattr(self, "_mention_btns", None) or []
+            if not btns:
+                return
+            idx = getattr(self, "_mention_idx", 0) + delta
+            self._mention_idx = idx % len(btns)
+            for i, b in enumerate(btns):
+                try:
+                    b.configure(fg_color=(C("accent") if i == self._mention_idx else "transparent"),
+                                text_color=("#ffffff" if i == self._mention_idx else C("text")))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _mention_confirm(self):
+        """@ 面板 Enter 确认：插入当前高亮的成员。"""
+        try:
+            btns = getattr(self, "_mention_btns", None) or []
+            idx = getattr(self, "_mention_idx", 0)
+            if 0 <= idx < len(btns):
+                btns[idx].invoke()
         except Exception:
             pass
 
@@ -6793,17 +6834,41 @@ class ChatApp:
             self._mention_frame.pack(padx=4, pady=4)
         for w in self._mention_frame.winfo_children():
             w.destroy()
+        self._mention_btns = []
+        self._mention_idx = 0
         for n in matches[:8]:
-            ctk.CTkButton(self._mention_frame, text="@" + n, height=26, corner_radius=6,
-                          fg_color="transparent", hover_color=C("hover"), text_color=C("text"),
-                          font=(FONT, 11), anchor="w",
-                          command=lambda nm=n: self._insert_mention(nm)).pack(fill="x", pady=1)
+            b = ctk.CTkButton(self._mention_frame, text="@" + n, height=26, corner_radius=6,
+                              fg_color="transparent", hover_color=C("hover"), text_color=C("text"),
+                              font=(FONT, 11), anchor="w",
+                              command=lambda nm=n: self._insert_mention(nm))
+            b.pack(fill="x", pady=1)
+            b.bind("<Enter>", lambda e, i=len(self._mention_btns): self._mention_hover(i))
+            self._mention_btns.append(b)
+        # 默认高亮第一个（键盘直接 Enter 插入）
+        try:
+            self._mention_btns[0].configure(fg_color=C("accent"), text_color="#ffffff")
+        except Exception:
+            pass
         self._mention_win.update_idletasks()
         w = self._mention_win.winfo_reqwidth()
         h = self._mention_win.winfo_reqheight()
         x = self.input_box.winfo_rootx()
         y = self.input_box.winfo_rooty() - h - 6
         self._mention_win.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+    def _mention_hover(self, i):
+        """@ 面板鼠标悬停：同步高亮到该按钮。"""
+        try:
+            self._mention_idx = i
+            btns = getattr(self, "_mention_btns", None) or []
+            for j, b in enumerate(btns):
+                try:
+                    b.configure(fg_color=(C("accent") if j == i else "transparent"),
+                                text_color=("#ffffff" if j == i else C("text")))
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _insert_mention(self, name):
         try:
@@ -6812,6 +6877,10 @@ class ChatApp:
             if at >= 0:
                 self.input_box.delete(f"1.0 + {at} chars", "insert")
                 self.input_box.insert("insert", "@" + name + " ")
+        except Exception:
+            pass
+        try:
+            self._update_send_btn_state()
         except Exception:
             pass
         self._close_mention_panel()

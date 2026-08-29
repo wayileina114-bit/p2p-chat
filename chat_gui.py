@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3634,6 +3634,12 @@ class ChatApp:
         old = self._sessions.get(self._current)
         if old is not None and old.get("key") != key:
             old["last_seen_ts"] = time.time()
+            # 草稿保存：切换会话时保留当前输入内容
+            try:
+                draft = self.input_box.get("1.0", "end").strip()
+                old["draft"] = draft if draft and not self._hint_active else ""
+            except Exception:
+                pass
         self._current = key
         self._history_expanded = False
         if self._search_query:
@@ -3647,7 +3653,22 @@ class ChatApp:
         s["unread"] = 0
         s["@me"] = False
         self._update_chat_title()
-        self._reset_input_hint()
+        # 恢复草稿（如有）
+        try:
+            draft = (s.get("draft") or "").strip()
+            if draft and self._hint_active:
+                self.input_box.delete("1.0", "end")
+                self.input_box.configure(text_color=C("text"))
+                self._hint_active = False
+            if draft:
+                self.input_box.delete("1.0", "end")
+                self.input_box.insert("1.0", draft)
+                self.input_box.configure(text_color=C("text"))
+                self._hint_active = False
+        except Exception:
+            pass
+        if not (s.get("draft") or "").strip():
+            self._reset_input_hint()
         self._render_feed()
         self._apply_session_list()
         self._update_window_title()
@@ -4772,8 +4793,26 @@ class ChatApp:
                 seen.add(n)
         return names
 
+    def _autosize_input(self):
+        """输入框高度自适应：内容多行时自动增高，发送后恢复。"""
+        try:
+            box = self.input_box
+            cur = int(box.cget("height"))
+            text = box.get("1.0", "end").rstrip(chr(10))
+            est = 0
+            for ln in text.split(chr(10)):
+                est += max(1, -(-len(ln) // 60))
+            target = max(2, min(est, 5))
+            want = 72 if target <= 2 else (72 + (target - 2) * 22)
+            want = max(72, min(want, 160))
+            if want != cur:
+                box.configure(height=want)
+        except Exception:
+            pass
+
     def _on_input_key(self, event):
         """检测 @ 输入并弹出成员提及面板；同时广播“正在输入”。"""
+        self._autosize_input()
         if event.keysym in ("Up", "Down", "Return", "Escape", "Left", "Right", "BackSpace"):
             return
         self._send_typing()
@@ -4793,6 +4832,9 @@ class ChatApp:
 
     def _open_mention_panel(self, partial):
         names = self._mention_names()
+        # @全部成员：在空提示或匹配 all/所有人 时出现
+        if not partial.strip() or partial.strip().lower() in ("all", "所有人"):
+            names = ["所有人"] + names
         matches = [n for n in names if partial.lower() in n.lower()]
         if not matches:
             self._close_mention_panel()
@@ -5012,11 +5054,16 @@ class ChatApp:
                     hover_color=C("input_hover"), font=(FONT, 10),
                     command=self._toggle_emoji_lock)
                 self._emoji_lock_btn.pack(side="right")
-                # 分类页签
+                # 分类页签（最近使用在前，有记录才显示）
+                self._recent_emojis = list(_load_settings().get("recent_emojis", []) or [])[:24]
+                self._emoji_groups = []
+                if self._recent_emojis:
+                    self._emoji_groups.append({"label": "最近", "items": self._recent_emojis})
+                self._emoji_groups.extend(EMOJI_GROUPS)
                 tabbar = ctk.CTkFrame(win, fg_color="transparent")
                 tabbar.pack(fill="x", padx=4, pady=(2, 0))
                 self._emoji_tab_btns = []
-                for gi, g in enumerate(EMOJI_GROUPS):
+                for gi, g in enumerate(self._emoji_groups):
                     tb = ctk.CTkButton(tabbar, text=g["label"], width=0, height=22, corner_radius=8,
                                        fg_color=C("input_bg"), text_color=C("text"),
                                        hover_color=C("input_hover"), font=(FONT, 9),
@@ -5114,7 +5161,8 @@ class ChatApp:
             self._emoji_font = getattr(self, "_emoji_font", None) or ("Segoe UI Emoji", 15)
             cv.delete("all")
             cv.delete("emojihl")
-            g = EMOJI_GROUPS[gi] if 0 <= gi < len(EMOJI_GROUPS) else EMOJI_GROUPS[0]
+            groups = getattr(self, "_emoji_groups", None) or EMOJI_GROUPS
+            g = groups[gi] if 0 <= gi < len(groups) else groups[0]
             cell = getattr(self, "_emoji_cell", 36)
             cols = getattr(self, "_emoji_cols", 10)
             self._emoji_items = []
@@ -5227,6 +5275,15 @@ class ChatApp:
                 self._hint_active = False
             self.input_box.insert("insert", em)
             self.input_box.focus_set()
+        except Exception:
+            pass
+        # 记录最近使用（存设置，最多 24 个）
+        try:
+            rec = list(_load_settings().get("recent_emojis", []) or [])
+            if em in rec:
+                rec.remove(em)
+            rec.insert(0, em)
+            _update_settings("recent_emojis", rec[:24])
         except Exception:
             pass
         # 锁定时保持面板开着，方便一次点多个表情；否则插入后自动关闭
@@ -5641,10 +5698,11 @@ class ChatApp:
         else:
             self._set_status("撤回失败", "err")
 
-    def _start_reply(self, name, text):
+    def _start_reply(self, name, text, mid=None):
         """进入引用回复状态：显示回复栏并聚焦输入框。"""
         self._reply_to = {"name": str(name or "")[:20],
-                          "text": str(text or "").replace("\n", " ")[:60]}
+                          "text": str(text or "").replace("\n", " ")[:60],
+                          "mid": mid or None}
         for w in self.reply_bar.winfo_children():
             w.destroy()
         ctk.CTkLabel(self.reply_bar, text=f"↩ 回复 {self._reply_to['name']}：{self._reply_to['text']}",
@@ -6019,9 +6077,13 @@ class ChatApp:
         if reply:
             rname = str(reply.get("name", ""))[:20]
             rtext = str(reply.get("text", "")).replace("\n", " ")[:40]
-            ctk.CTkLabel(bubble, text=f"↩ {rname}：{rtext}", text_color=C("text_mute"),
-                         font=(FONT, 9), anchor="w", justify="left",
-                         wraplength=440).pack(anchor="w", padx=12, pady=(6, 0))
+            rmid = reply.get("mid")
+            rlbl = ctk.CTkLabel(bubble, text=f"↩ {rname}：{rtext}", text_color=C("text_mute"),
+                                font=(FONT, 9), anchor="w", justify="left",
+                                wraplength=440, cursor=("hand2" if rmid else ""))
+            rlbl.pack(anchor="w", padx=12, pady=(6, 0))
+            if rmid:
+                rlbl.bind("<Button-1>", lambda e, m=rmid: self._jump_to_message(m))
         if show_head:
             head = ctk.CTkFrame(bubble, fg_color="transparent")
             head.pack(fill="x", padx=12, pady=(6, 0))
@@ -6037,8 +6099,8 @@ class ChatApp:
         if mid:
             self._body_labels[mid] = body
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
-        body.bind("<Double-Button-1>", lambda e, t=text, n=name: self._start_reply(n, t))
-        bubble.bind("<Double-Button-1>", lambda e, t=text, n=name: self._start_reply(n, t))
+        body.bind("<Double-Button-1>", lambda e, t=text, n=name, m=mid: self._start_reply(n, t, m))
+        bubble.bind("<Double-Button-1>", lambda e, t=text, n=name, m=mid: self._start_reply(n, t, m))
         # 消息内 @提及高亮：识别 @昵称 生成可点击标签（点击直接引用回复该成员）
         m_names = self._mention_names()
         mentions = _extract_mentions(text, m_names)
@@ -6410,7 +6472,7 @@ class ChatApp:
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
             menu.add_command(label="多选转发…", command=self._start_multi_select)
-            menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text))
+            menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text, mid))
             if mid:
                 react_menu = tk.Menu(menu, tearoff=0)
                 for emo in ["👍", "❤️", "😂", "😮", "😢", "🙏"]:
@@ -6645,6 +6707,41 @@ class ChatApp:
             if len(kids) > ChatApp.FEED_MAX:
                 for w in kids[:len(kids) - ChatApp.FEED_MAX]:
                     w.destroy()
+        except Exception:
+            pass
+
+    def _jump_to_message(self, mid):
+        try:
+            s = self._sessions.get(self._current)
+            if s is None or not mid:
+                return
+            exists = any(m.get("mid") == mid for m in s.get("messages", []))
+            if not exists:
+                self._set_status("被引用的消息不在当前会话", "err")
+                return
+            self._history_expanded = True
+            self._render_feed()
+            def _do():
+                try:
+                    canvas = self.feed._parent_canvas
+                    canvas.update_idletasks()
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                    bf = self._bubble_frames.get(mid)
+                    if bf is not None:
+                        y = bf.winfo_y()
+                        total = max(1, canvas.winfo_reqheight())
+                        frac = max(0.0, min(1.0, y / total))
+                        canvas.yview_moveto(frac)
+                        bf.configure(border_width=2, border_color=C("search_hl"))
+                        def _unhl(_b=bf):
+                            try:
+                                _b.configure(border_width=0, border_color=None)
+                            except Exception:
+                                pass
+                        self.root.after(1500, _unhl)
+                except Exception:
+                    pass
+            self.root.after(50, _do)
         except Exception:
             pass
 

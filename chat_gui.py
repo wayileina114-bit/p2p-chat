@@ -95,7 +95,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.7"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.8"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -5455,7 +5455,7 @@ class ChatApp:
                 self.root.after_cancel(self._msg_search_after)
             except Exception:
                 pass
-        self._msg_search_after = self.root.after(200, self._apply_search)
+        self._msg_search_after = self.root.after(150, self._apply_search)
 
     def _apply_search(self):
         self._msg_search_after = None
@@ -5758,6 +5758,7 @@ class ChatApp:
             muted = self._is_muted(key)
             pinned = self._is_pinned_session(key)
             room = self._sessions.get(key, {}).get("room", "") if self._sessions.get(key) else ""
+            menu.add_command(label="✏️ 重命名显示名…", command=lambda: self._rename_session(key))
             menu.add_command(label=("取消置顶" if pinned else "置顶会话"),
                              command=lambda: self._toggle_pin_session(key))
             menu.add_command(label=("取消静音" if muted else "静音会话"),
@@ -5780,6 +5781,7 @@ class ChatApp:
             fav = self._is_contact(s["cid"])
             menu.add_command(label=("取消收藏" if fav else "★ 收藏联系人"),
                              command=lambda: self._toggle_contact(s["cid"], s["name"]))
+            menu.add_command(label="✏️ 重命名显示名…", command=lambda: self._rename_session(s["key"]))
             muted = self._is_muted(s["key"])
             pinned = self._is_pinned_session(s["key"])
             menu.add_command(label=("取消置顶" if pinned else "置顶会话"),
@@ -5863,6 +5865,20 @@ class ChatApp:
 
     # --------------------------- 发送 ---------------------------
 
+    def _update_send_btn_state(self):
+        """输入为空时发送按钮置灰，有内容时点亮（交互反馈）。"""
+        try:
+            txt = self.input_box.get("1.0", "end").strip()
+            has = bool(txt) and not self._hint_active
+            if has != getattr(self, "_send_btn_active", False):
+                self._send_btn_active = has
+                self.send_btn.configure(
+                    fg_color=(C("accent") if has else C("input_bg")),
+                    text_color=("#ffffff" if has else C("text_mute")),
+                    hover_color=(C("accent_hover") if has else C("input_hover")))
+        except Exception:
+            pass
+
     def _send_text(self):
         if self._hint_active:
             return
@@ -5873,6 +5889,13 @@ class ChatApp:
             self._show_system("尚未连接，无法发送。")
             return
         self.input_box.delete("1.0", "end")
+        try:
+            self._send_btn_active = False
+            self.send_btn.configure(fg_color=C("input_bg"),
+                                    text_color=C("text_mute"),
+                                    hover_color=C("input_hover"))
+        except Exception:
+            pass
         s = self._sessions.get(self._current)
         if s is None:
             return
@@ -5988,6 +6011,10 @@ class ChatApp:
     def _on_input_key(self, event):
         """检测 @ 输入并弹出成员提及面板；同时广播“正在输入”。"""
         self._autosize_input()
+        try:
+            self._update_send_btn_state()
+        except Exception:
+            pass
         if event.keysym in ("Up", "Down", "Return", "Escape", "Left", "Right", "BackSpace"):
             return
         self._send_typing()
@@ -7154,6 +7181,11 @@ class ChatApp:
             for s in self._sessions.values():
                 if s["kind"] == "dm":
                     s["online"] = s["cid"] in self._peers
+                    p = self._peers.get(s["cid"])
+                    if p and p.get("name") and not s.get("local_alias"):
+                        # 对方改了昵称（presence 更新）→ 同步会话显示名
+                        if s.get("name") != p["name"]:
+                            s["name"] = str(p["name"])[:40]
             self._schedule_session_list()
             self._update_chat_title()
             self._refresh_members()
@@ -7190,6 +7222,38 @@ class ChatApp:
         _update_settings("muted_sessions", sorted(self._muted))
         self._last_list_fp = None
         self._apply_session_list()
+
+    def _rename_session(self, key):
+        """重命名会话显示名（本地备注，不广播）。"""
+        try:
+            s = self._sessions.get(key)
+            if s is None:
+                return
+            from tkinter import simpledialog
+            cur = s.get("local_alias") or s.get("name") or ""
+            v = simpledialog.askstring("重命名显示名",
+                                       "输入新的显示名（仅本机生效，留空恢复原名称）：",
+                                       initialvalue=cur)
+            if v is None:
+                return
+            v = v.strip()
+            if v:
+                s["local_alias"] = v[:30]
+                s["name"] = v[:30]
+            else:
+                s.pop("local_alias", None)
+                if s["kind"] == "group":
+                    s["name"] = s.get("room", "群聊")
+                else:
+                    p = self._peers.get(s.get("cid"))
+                    s["name"] = (p.get("name") if p else s.get("name") or "对方")[:40]
+            self._last_list_fp = None
+            self._apply_session_list()
+            if key == self._current:
+                self._update_chat_title()
+            self._set_status("已重命名显示名" if v else "已恢复原名称", "ok")
+        except Exception:
+            pass
 
     def _restore_status(self):
         """把状态栏恢复为连接状态（悬停显示时间后调用）。"""
@@ -8508,9 +8572,18 @@ class ChatApp:
     def _trim_feed(self):
         try:
             kids = self.feed.winfo_children()
-            if len(kids) > ChatApp.FEED_MAX:
-                for w in kids[:len(kids) - ChatApp.FEED_MAX]:
-                    w.destroy()
+            over = len(kids) - ChatApp.FEED_MAX
+            if over > 0:
+                # 批量销毁：单次 Tcl destroy 调用替代逐条 Python 销毁（大会话更快）
+                batch = kids[:over]
+                try:
+                    self.feed.tk.call("destroy", *[str(w) for w in batch])
+                except Exception:
+                    for w in batch:
+                        try:
+                            w.destroy()
+                        except Exception:
+                            pass
         except Exception:
             pass
 

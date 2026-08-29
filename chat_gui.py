@@ -95,7 +95,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -710,14 +710,24 @@ def _read_qr_text(path):
         return ""
 
 
+_NAME_COLOR_CACHE = {}
+
+
 def _name_color(name):
-    """根据昵称生成稳定的头像底色（Discord 风格彩色首字母）。"""
+    """根据昵称生成稳定的头像底色（Discord 风格彩色首字母，结果缓存）。"""
+    key = str(name or "?")
+    if key in _NAME_COLOR_CACHE:
+        return _NAME_COLOR_CACHE[key]
     palette = ["#5865f2", "#3ba55d", "#faa61a", "#ed4245", "#eb459e",
                "#00a8fc", "#9146ff", "#f47fff"]
     h = 0
-    for ch in str(name):
+    for ch in key:
         h = (h * 31 + ord(ch)) & 0xffffffff
-    return palette[h % len(palette)]
+    c = palette[h % len(palette)]
+    if len(_NAME_COLOR_CACHE) > 512:
+        _NAME_COLOR_CACHE.clear()
+    _NAME_COLOR_CACHE[key] = c
+    return c
 
 
 _URL_RE = None
@@ -3257,6 +3267,12 @@ class ChatApp:
         except Exception:
             pass
         self.nav_avatar.bind("<Button-1>", lambda e: self._open_profile_card())
+        # 头像延迟加载（启动不卡）：稍后再解码图片
+        try:
+            if self._avatar and os.path.isfile(self._avatar):
+                self.root.after(400, self._render_nav_avatar)
+        except Exception:
+            pass
         ctk.CTkFrame(rail, width=30, height=2, corner_radius=1,
                      fg_color=C("hover")).pack(pady=(2, 6))
         # 房间图标列表（滚动）
@@ -3410,6 +3426,12 @@ class ChatApp:
                                          hover_color=C("input_hover"), command=self._toggle_members)
         self.members_btn.pack(side="right")
         # ⋯ 更多菜单：全部已读 / 消息筛选 / @我汇总（收纳低频操作，标题行更清爽）
+        self.next_unread_btn = ctk.CTkButton(self.title_row, text="↧ 未读", width=56, height=26,
+                                              corner_radius=R(8), font=(FONT, 10, "bold"),
+                                              fg_color=C("input_bg"), text_color=C("accent"),
+                                              hover_color=C("input_hover"),
+                                              command=self._goto_next_unread)
+        self.next_unread_btn.pack(side="right", padx=(0, 6))
         self.more_btn = ctk.CTkButton(self.title_row, text="⋯", width=32, height=26,
                                       corner_radius=R(8), font=(FONT, 13, "bold"),
                                       fg_color=C("input_bg"), text_color=C("text_2"),
@@ -3955,6 +3977,19 @@ class ChatApp:
 
     def _open_image(self, path):
         ImagePreview(self.root, path)
+
+    def _render_nav_avatar(self):
+        """导航栏头像渲染（延迟调用，启动不卡）。"""
+        try:
+            nav = getattr(self, "nav_avatar", None)
+            if nav is None or not self._avatar:
+                return
+            img = _load_ctk_image(self._avatar, 36, 36)
+            if img is not None:
+                self._images.append(img)
+                nav.configure(image=img, text="")
+        except Exception:
+            pass
 
     def _render_top_avatar(self):
         """渲染头像到导航栏（Web 端风格：头像在左上角导航栏）。"""
@@ -5680,6 +5715,25 @@ class ChatApp:
         except Exception:
             pass
 
+    def _goto_next_unread(self):
+        """跳转到下一条有未读的会话（按会话列表顺序循环）。"""
+        try:
+            keys = [k for k, s in self._sessions.items()
+                    if (s.get("unread") or 0) > 0]
+            if not keys:
+                self._set_status("没有未读消息", "mute")
+                return
+            cur = self._current
+            try:
+                idx = keys.index(cur)
+            except Exception:
+                idx = -1
+            nxt = keys[(idx + 1) % len(keys)]
+            self._switch_to(nxt)
+            self._set_status(f"跳转到未读会话（剩 {len(keys) - 1} 条未读会话）", "accent")
+        except Exception:
+            pass
+
     def _mark_all_read(self):
         """全部已读：一键清零所有会话未读数（任务栏角标同步消失）。"""
         try:
@@ -6025,6 +6079,10 @@ class ChatApp:
                         self._show_system("尚未连接，无法发送。")
                         return "break"
                     self._do_send_file(p0)
+                    try:
+                        self.input_box.focus_set()
+                    except Exception:
+                        pass
                     return "break"
                 return None  # 文件非图片：走默认粘贴路径
             if isinstance(clip, Image.Image):
@@ -6654,7 +6712,7 @@ class ChatApp:
             h = tcv.winfo_height()
             if h <= 1:
                 h = getattr(self, "_emoji_head_h", 30)
-            tcv.create_text(10, h // 2, text="😊 表情（点击外部关闭）",
+            tcv.create_text(10, h // 2, text="✿ 表情（点击外部关闭）",
                             font=self._emoji_title_font, fill=C("text_mute"), anchor="w")
             # 底部品牌装饰线（与主窗口顶栏色条呼应）
             tcv.create_rectangle(0, h - 2, w, h, fill=C("accent"), outline="", width=0)

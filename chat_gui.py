@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.3.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.3.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1852,6 +1852,13 @@ class MqttBackend:
             return
         r["received"].add(idx)
         r["got"] += 1
+        # 接收进度节流上报（约每 5% 一次），状态栏能看到接收百分比
+        try:
+            if r["got"] % max(1, r["total"] // 20) == 0 or r["got"] >= r["total"]:
+                pct = int(r["got"] * 100 / max(1, r["total"]))
+                self._fire_file(r["room"], "progress", {"name": r["name"], "percent": pct})
+        except Exception:
+            pass
         if r["got"] >= r["total"]:
             self._finish(tid)
 
@@ -2956,6 +2963,7 @@ class ChatApp:
         self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
         self._new_msg_floating = None  # “↓ 新消息”浮标（用户上翻时新消息到达提示）
         self._search_query = ""      # 会话内消息搜索关键词（空 = 未搜索）
+        self._expanded_msgs = set()  # 已展开全文的长消息 mid（不再折叠）
         self._feed_filter = ""       # 消息筛选："" 全部 / "img" 只看图片 / "file" 只看文件
         self._msg_search_after = None  # 消息搜索防抖 timer id
         self._suppress_auto_scroll = False  # 全量渲染时抑制逐条自动滚动，避免布局抖动/残影
@@ -3154,6 +3162,12 @@ class ChatApp:
                                          fg_color=C("input_bg"), text_color=C("text_2"),
                                          hover_color=C("input_hover"), command=self._toggle_members)
         self.members_btn.pack(side="right")
+        self.mention_btn = ctk.CTkButton(self.title_row, text="📢 @我", width=76, height=26,
+                                         corner_radius=8, font=(FONT, 11),
+                                         fg_color=C("input_bg"), text_color=C("text_2"),
+                                         hover_color=C("input_hover"), command=self._open_mentions)
+        self.mention_btn.pack(side="right", padx=(0, 6))
+        self._refresh_mention_btn()
         self.readall_btn = ctk.CTkButton(self.title_row, text="✔ 全部已读", width=82, height=26,
                                          corner_radius=8, font=(FONT, 11),
                                          fg_color=C("input_bg"), text_color=C("text_2"),
@@ -4275,6 +4289,7 @@ class ChatApp:
         elif total == 0:
             ctk.CTkLabel(self.session_frame, text="（无匹配）",
                          text_color=C("text_mute"), font=(FONT, 10)).pack(anchor="w", padx=10, pady=8)
+        self._refresh_mention_btn()
 
     def _collapsed_groups(self):
         """会话分组折叠状态（存会话对象，避免读盘）。"""
@@ -5200,7 +5215,77 @@ class ChatApp:
             self._last_list_fp = None
             self._apply_session_list()
             self._update_window_title()
+            self._refresh_mention_btn()
             self._set_status("已全部标为已读" if n else "当前没有未读消息", "ok")
+        except Exception:
+            pass
+
+    def _refresh_mention_btn(self):
+        """刷新标题栏「@我」按钮的未读数量角标。"""
+        try:
+            n = sum(1 for s in self._sessions.values() if s.get("@me"))
+            btn = getattr(self, "mention_btn", None)
+            if btn is None:
+                return
+            if n:
+                btn.configure(text=f"📢 @我 ({n})",
+                              fg_color=C("accent"), text_color="#ffffff")
+            else:
+                btn.configure(text="📢 @我",
+                              fg_color=C("input_bg"), text_color=C("text_2"))
+        except Exception:
+            pass
+
+    def _open_mentions(self):
+        """@我汇总：列出所有会话里 @我的消息，点击直接跳转（QQ 消息盒子）。"""
+        try:
+            items = []
+            for key, s in self._sessions.items():
+                for m in s.get("messages", []):
+                    if m.get("mid") and self._mentions_me(m.get("text", ""))                             and not m.get("mine") and not m.get("system")                             and not m.get("recalled"):
+                        items.append((float(m.get("ts") or 0), key, m))
+            items.sort(key=lambda x: -x[0])
+            win = ctk.CTkToplevel(self.root)
+            win.title("@我 的消息")
+            win.geometry("400x460")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            if not items:
+                ctk.CTkLabel(win, text="（还没有人 @ 你）", text_color=C("text_mute"),
+                             font=(FONT, 12)).pack(pady=24)
+                win.bind("<Escape>", lambda e: win.destroy())
+                return
+            ctk.CTkLabel(win, text=f"📢 共 {len(items)} 条 @我的消息 · 点击跳转",
+                         text_color=C("accent"), font=(FONT, 11, "bold")).pack(pady=(12, 4))
+            scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
+            scroll.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+            for ts, key, m in items[:100]:
+                sname = self._sessions.get(key, {}).get("name") or key
+                who = str(m.get("name", "对方"))
+                snip = str(m.get("text", "")).replace("\n", " ")[:46]
+                row = ctk.CTkButton(
+                    scroll, text=f"[{sname}] {who}：{snip}", height=34, corner_radius=8,
+                    anchor="w", fg_color=C("input_bg"), text_color=C("text"),
+                    hover_color=C("input_hover"), font=(FONT, 11),
+                    command=lambda k=key, mm=m.get("mid"): self._jump_mention(win, k, mm))
+                row.pack(fill="x", pady=2)
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
+    def _jump_mention(self, win, key, mid):
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        try:
+            self._switch_to(key)
+            s = self._sessions.get(key)
+            if s:
+                s["@me"] = False
+                self._refresh_mention_btn()
+            self._render_feed()
+            self.root.after(60, lambda m=mid: self._scroll_to_mid(m))
         except Exception:
             pass
 
@@ -6821,10 +6906,19 @@ class ChatApp:
             if tstr:
                 ctk.CTkLabel(head, text=tstr, text_color=C("text_mute"),
                              font=(FONT, 9)).pack(side="right")
-        body = ctk.CTkLabel(bubble, text=text, wraplength=460, justify="left",
+        _long = (mid and len(str(text)) > 320 and mid not in self._expanded_msgs
+                 and not self._search_query)
+        body = ctk.CTkLabel(bubble, text=(str(text)[:320] + "…" if _long else text),
+                            wraplength=460, justify="left",
                             text_color=(C("mine_text") if mine else C("other_text")),
                             font=(FONT, 12))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
+        if _long:
+            ctk.CTkButton(bubble, text="展开全文", width=84, height=22, corner_radius=6,
+                          fg_color="transparent", text_color=C("accent"),
+                          hover_color=C("hover"), font=(FONT, 10),
+                          command=lambda m=mid, ft=str(text): self._expand_message(m, ft)
+                          ).pack(anchor="w", padx=12, pady=(0, 4))
         if mid:
             self._body_labels[mid] = body
         body.bind("<Button-3>", lambda e, t=text, p=file_path: self._message_menu(e, t, p, mine=mine, mid=mid, name=name))
@@ -7385,9 +7479,13 @@ class ChatApp:
             pass
 
     def _image_menu(self, event, path):
-        """图片消息右键菜单：保存 / 复制图片 / 打开大图 / 打开位置。"""
+        """图片消息右键菜单：转发 / 保存 / 复制图片 / 打开大图 / 打开位置。"""
         try:
             menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="转发到…",
+                             command=lambda: self._forward_dialog(
+                                 [{"type": "file", "path": path,
+                                   "label": os.path.basename(path)}]))
             menu.add_command(label="保存图片到本地…", command=lambda: self._save_image_dialog(path))
             menu.add_command(label="复制图片", command=lambda: self._copy_image(path))
             menu.add_separator()
@@ -7453,6 +7551,35 @@ class ChatApp:
             except Exception:
                 pass
 
+    def _expand_message(self, mid, full_text):
+        """展开长消息全文：更新正文标签、销毁「展开全文」按钮并记住不再折叠。"""
+        try:
+            body = self._body_labels.get(mid)
+            if body is not None:
+                try:
+                    body.configure(text=full_text)
+                except Exception:
+                    pass
+            self._expanded_msgs.add(mid)
+            bubble = self._bubble_frames.get(mid)
+            if bubble is not None:
+                for w in bubble.winfo_children():
+                    try:
+                        if isinstance(w, ctk.CTkButton) and w.cget("text") == "展开全文":
+                            w.destroy()
+                    except Exception:
+                        pass
+            self._maybe_scroll_bottom()
+        except Exception:
+            pass
+
+    def _copy_as_quote(self, name, text):
+        """复制为引用格式：方便在群里引用别人说的话（QQ 式）。"""
+        t = str(text or "").replace("\r", "").strip()
+        quote = f"引用 {name or '对方'} 的消息：\n{t}\n"
+        self._copy_to_clipboard(quote)
+        self._set_status("已复制为引用格式", "ok")
+
     def _copy_to_clipboard(self, text):
         try:
             self.root.clipboard_clear()
@@ -7505,6 +7632,7 @@ class ChatApp:
 
             menu = tk.Menu(self.root, tearoff=0)
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
+            menu.add_command(label="复制为引用", command=lambda: self._copy_as_quote(name, text))
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))
             menu.add_command(label="多选转发…", command=self._start_multi_select)
             menu.add_command(label="引用回复", command=lambda: self._start_reply(name or "对方", text, mid))

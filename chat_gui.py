@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -10170,8 +10170,12 @@ class ImagePreview:
 
         ctk.CTkLabel(top, text=os.path.basename(path), text_color=C("text_2"),
                      font=(FONT, 11)).pack(padx=20, pady=(12, 4))
-        self._img_lbl = ctk.CTkLabel(top, image=ctk_img, text="")
+        self._img_lbl = ctk.CTkLabel(top, image=ctk_img, text="", fg_color="#000000")
         self._img_lbl.pack(padx=24, pady=(0, 4))
+        # 缩放百分比指示（点按可在 100% ↔ 适应间切换）
+        self._zoom_lbl = ctk.CTkLabel(top, text="100% · 双击切换", text_color=C("text_mute"),
+                                      font=(FONT, 9))
+        self._zoom_lbl.pack(pady=(0, 2))
         # 操作栏：缩小 / 放大 / 旋转 / 保存副本
         ctrl = ctk.CTkFrame(top, fg_color="transparent")
         ctrl.pack(pady=(0, 6))
@@ -10194,6 +10198,14 @@ class ImagePreview:
         ctk.CTkButton(top, text="关闭", width=90, height=30, corner_radius=8,
                       fg_color=C("input_bg"), hover_color=C("input_hover"),
                       text_color=C("text_2"), font=(FONT, 12), command=top.destroy).pack(pady=(4, 14))
+        # 双击图片：100% ↔ 适应窗口 切换（QQ 看图行为）
+        self._fit_lvl = 1.0
+        try:
+            fit = min(1.0, (600.0 / max(1, img.height)), (820.0 / max(1, img.width)))
+            self._fit_lvl = max(0.1, fit)
+        except Exception:
+            pass
+        self._img_lbl.bind("<Double-Button-1>", lambda e: self._toggle_fit())
 
         # 用图片自身（逻辑）尺寸设置窗口，避免高分屏下 winfo 物理像素被误当逻辑像素导致窗口放大
         scale = 1.0
@@ -10233,6 +10245,30 @@ class ImagePreview:
             ctk_img = CTkImage(light_image=img, dark_image=img, size=(w, h))
             self._ctk_img = ctk_img
             self._img_lbl.configure(image=ctk_img)
+            try:
+                self._zoom_lbl.configure(text=f"{int(self._zoom_lvl * 100)}% · 双击切换")
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _toggle_fit(self):
+        """双击图片：100% ↔ 适应窗口 切换（QQ 看图行为）。"""
+        try:
+            if getattr(self, "_zoom_lvl", 1.0) > 1.01:
+                self._zoom_lvl = getattr(self, "_fit_lvl", 1.0)
+            else:
+                self._zoom_lvl = 1.0
+            img = self._orig_img
+            w = max(1, int(self._base_w * self._zoom_lvl))
+            h = max(1, int(self._base_h * self._zoom_lvl))
+            ctk_img = CTkImage(light_image=img, dark_image=img, size=(w, h))
+            self._ctk_img = ctk_img
+            self._img_lbl.configure(image=ctk_img)
+            try:
+                self._zoom_lbl.configure(text=f"{int(self._zoom_lvl * 100)}% · 双击切换")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -10252,7 +10288,7 @@ class ImagePreview:
             pass
 
     def _save_copy(self, path):
-        """把当前预览图保存为副本。"""
+        """把当前预览图（含缩放/旋转效果）保存为副本。"""
         try:
             from tkinter import filedialog
             base = os.path.basename(path) or "image.png"
@@ -10265,6 +10301,12 @@ class ImagePreview:
             img = self._orig_img
             if getattr(self, "_rotated", 0):
                 img = img.rotate(-90 * self._rotated, expand=True)
+            # 应用当前缩放级别（保存所见即所得）
+            z = getattr(self, "_zoom_lvl", 1.0)
+            if z and abs(z - 1.0) > 0.01:
+                w = max(1, int(img.width * z))
+                h = max(1, int(img.height * z))
+                img = img.resize((w, h), getattr(__import__("PIL").Image, "LANCZOS", 1))
             img.save(dest)
             try:
                 messagebox.showinfo("已保存", f"图片已保存到：\n{dest}")

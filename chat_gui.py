@@ -32,6 +32,8 @@ import uuid
 
 # 图片缩略图解码并发上限：图片多时防止线程爆炸（每图一线程）
 _THUMB_SEM = threading.Semaphore(4)
+# 语音时长缓存：path -> 秒（避免重复读 wav 文件头）
+_VOICE_DUR_CACHE = {}
 
 try:
     import paho.mqtt.client as mqtt
@@ -95,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1068,23 +1070,33 @@ def _save_contacts(contacts):
         pass
 
 
+_SETTINGS_CACHE = None  # 设置缓存：避免每次读取都走磁盘
+
+
 def _load_settings():
+    """读取设置（带内存缓存；写入后自动失效）。"""
+    global _SETTINGS_CACHE
+    if _SETTINGS_CACHE is not None:
+        return dict(_SETTINGS_CACHE)
     _ensure_data_dir()
     p = os.path.join(DATA_DIR, "settings.json")
     try:
         with open(p, "r", encoding="utf-8") as f:
             d = json.load(f) or {}
+            _SETTINGS_CACHE = dict(d)
             return d
     except Exception:
         return {}
 
 
 def _save_settings(d):
+    global _SETTINGS_CACHE
     _ensure_data_dir()
     p = os.path.join(DATA_DIR, "settings.json")
     try:
         with open(p, "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False)
+        _SETTINGS_CACHE = dict(d)
     except Exception:
         pass
 
@@ -3682,6 +3694,12 @@ class ChatApp:
                 unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
                 command=self._apply_appearance_mode).pack(fill="x", padx=26, pady=(2, 4))
 
+            # 开机自启动（Windows 注册表 Run 键）
+            autostart_var = tk.BooleanVar(value=self._is_autostart())
+            ctk.CTkCheckBox(win, text="开机自动启动", variable=autostart_var,
+                            command=lambda: self._set_autostart(autostart_var.get()),
+                            font=(FONT, 12), text_color=C("text")).pack(anchor="w", padx=26, pady=5)
+
             popup_var = tk.BooleanVar(value=self.notify_popup)
             ctk.CTkCheckBox(win, text="Windows 通知弹窗", variable=popup_var,
                             command=lambda: self._apply_setting("notify_popup", popup_var, "notify_popup"),
@@ -3766,6 +3784,50 @@ class ChatApp:
             self._set_status("已开启端到端加密" if v else "已关闭端到端加密", "ok")
         except Exception:
             pass
+
+    def _is_autostart(self):
+        """是否已注册开机自启动（Windows Run 键）。"""
+        if os.name != "nt":
+            return False
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+                try:
+                    winreg.QueryValueEx(k, "P2PChat")
+                    return True
+                except FileNotFoundError:
+                    return False
+        except Exception:
+            return False
+
+    def _set_autostart(self, on):
+        """设置/取消开机自启动（Windows 注册表 Run 键，指向当前程序）。"""
+        try:
+            if os.name != "nt":
+                self._set_status("仅 Windows 支持开机自启动", "err")
+                return
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                 r"Software\Microsoft\Windows\CurrentVersion\Run",
+                                 0, winreg.KEY_SET_VALUE)
+            exe = sys.executable
+            if getattr(sys, "frozen", False):
+                target = f'"{exe}"'
+            else:
+                target = f'"{exe}" "{os.path.abspath(__file__)}"'
+            if on:
+                winreg.SetValueEx(key, "P2PChat", 0, winreg.REG_SZ, target)
+                self._set_status("已开启开机自启动", "ok")
+            else:
+                try:
+                    winreg.DeleteValue(key, "P2PChat")
+                except FileNotFoundError:
+                    pass
+                self._set_status("已关闭开机自启动", "mute")
+            winreg.CloseKey(key)
+        except Exception:
+            self._set_status("设置开机自启动失败", "err")
 
     def _auto_connect_on_startup(self):
         if not (self.backend and self.backend.running):
@@ -4386,6 +4448,10 @@ class ChatApp:
                 self.input_box.insert("1.0", draft)
                 self.input_box.configure(text_color=C("text"))
                 self._hint_active = False
+                try:
+                    self._update_send_btn_state()  # 恢复草稿后发送按钮点亮
+                except Exception:
+                    pass
         except Exception:
             pass
         if not (s.get("draft") or "").strip():
@@ -5296,6 +5362,8 @@ class ChatApp:
                             fh.write(data)
                         count += 1
             self._set_status(f"已恢复 {count} 个文件（重启后生效）", "ok")
+            global _SETTINGS_CACHE
+            _SETTINGS_CACHE = None  # 设置文件已还原，失效内存缓存（强制重新读盘）
         except Exception:
             self._set_status("恢复失败", "err")
 
@@ -6031,6 +6099,13 @@ class ChatApp:
         except Exception:
             pass
         s = self._sessions.get(self._current)
+        if s is not None and s.get("draft"):
+            s["draft"] = ""  # 发送成功清除草稿标记
+            try:
+                self._last_list_fp = None
+                self._apply_session_list()
+            except Exception:
+                pass
         if s is None:
             return
         my = self.nick_var.get().strip() or "未命名"
@@ -8116,9 +8191,13 @@ class ChatApp:
                              font=(FONT, 9)).pack(side="right")
         dur = 0
         try:
-            import wave
-            with wave.open(path, "rb") as wf:
-                dur = wf.getnframes() / float(wf.getframerate())
+            if path in _VOICE_DUR_CACHE:
+                dur = _VOICE_DUR_CACHE[path]
+            else:
+                import wave
+                with wave.open(path, "rb") as wf:
+                    dur = wf.getnframes() / float(wf.getframerate())
+                _VOICE_DUR_CACHE[path] = dur
         except Exception:
             pass
         dur_txt = f"{dur:.0f}″" if dur > 0 else ""

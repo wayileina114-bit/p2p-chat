@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3355,11 +3355,24 @@ class ChatApp:
         return rail
 
     def _refresh_nav_rail(self):
-        """刷新导航栏房间图标（选中态高亮胶囊）。"""
+        """刷新导航栏房间图标（选中态高亮胶囊）。
+
+        指纹：当前房间 / 各房间未读数 / 置顶集变化时才重建，presence 连串
+        更新或列表重绘时不重复销毁重建（导航栏是高频触发的轻量控件）。"""
         try:
             rail = getattr(self, "nav_rooms_frame", None)
             if rail is None:
                 return
+            try:
+                fp = (self._current,
+                      tuple((r, (self._sessions.get(self._group_key(r)) or {}).get("unread", 0),
+                             self._is_pinned_session(self._group_key(r)))
+                            for r in getattr(self, "_rooms", []) or []))
+                if fp == getattr(self, "_nav_rail_fp", None):
+                    return
+                self._nav_rail_fp = fp
+            except Exception:
+                pass
             for w in rail.winfo_children():
                 w.destroy()
             cur_room = None
@@ -3369,20 +3382,37 @@ class ChatApp:
             for room in getattr(self, "_rooms", []) or []:
                 ch = (str(room)[:1].upper() or "#")
                 sel = (room == cur_room)
+                key = self._group_key(room)
+                s = self._sessions.get(key)
+                unread = (s.get("unread") or 0) if s else 0
+                pinned = self._is_pinned_session(key)
                 irow = ctk.CTkFrame(rail, fg_color="transparent", height=44)
                 irow.pack(fill="x", pady=1)
                 # Discord 式选中指示条（左侧竖条）
                 ctk.CTkFrame(irow, width=3, height=28, corner_radius=2,
                              fg_color=(C("text") if sel else "transparent")).pack(
                     side="left", padx=(2, 1), fill="y")
+                # 置顶会话图标带 📌 角标（Discord 式徽标）
+                icon = ("📌" if pinned else ch)
                 b = ctk.CTkButton(
-                    irow, text=ch, width=40, height=40, corner_radius=20,
+                    irow, text=icon, width=40, height=40, corner_radius=20,
                     fg_color=(C("accent") if sel else C("input_bg")),
                     hover_color=C("accent_hover"),
                     text_color=("#ffffff" if sel else C("text")),
                     font=(FONT, 13, "bold"),
                     command=lambda r=room: self._switch_to(self._group_key(r)))
                 b.pack(side="left", padx=(2, 0))
+                # 未读红点（Discord 式右上角小圆点）
+                if unread:
+                    dot = ctk.CTkLabel(irow, text="", width=8, height=8, corner_radius=4,
+                                       fg_color=C("danger"))
+                    dot.place(relx=1.0, x=-8, y=4, anchor="ne")
+                # 悬停 tooltip：房间名（含未读数/置顶提示）
+                tip = room + (f" · {unread} 未读" if unread else "")
+                if pinned:
+                    tip += " · 置顶"
+                b.bind("<Enter>", lambda e, t=tip: self._set_status(t, "mute"))
+                b.bind("<Leave>", lambda e: self._restore_status())
         except Exception:
             pass
 
@@ -5398,7 +5428,8 @@ class ChatApp:
             s["@me"] = True
             if key != self._current:
                 self._schedule_session_list()
-        if not mine and self.notify_sound and not system and not self._dnd:
+        if not mine and self.notify_sound and not system and not self._dnd \
+                and s.get("key") not in self._muted:
             _play_notify_sound()
         if key == self._current:
             self._stick_bottom = self._at_bottom()

@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.4"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.5"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -4605,16 +4605,23 @@ class ChatApp:
         return key in self._collapsed_groups()
 
     def _add_section_header(self, text, group_key=""):
-        """分组标题（可点击折叠/展开）。"""
+        """分组标题（可点击折叠/展开，带装饰线）。"""
         collapsed = bool(group_key) and self._is_group_collapsed(group_key)
         arrow = ("▶ " if collapsed else "▼ ") if group_key else ""
-        lbl = ctk.CTkLabel(self.session_frame, text=arrow + text,
+        row = ctk.CTkFrame(self.session_frame, fg_color="transparent")
+        row.pack(fill="x", padx=6, pady=(10, 2))
+        ctk.CTkFrame(row, width=10, height=2, corner_radius=1,
+                     fg_color=C("accent")).pack(side="left", padx=(0, 6))
+        lbl = ctk.CTkLabel(row, text=arrow + text,
                            text_color=C("section"),
                            font=(FONT, 10, "bold"), anchor="w",
                            cursor=("hand2" if group_key else ""))
-        lbl.pack(fill="x", padx=6, pady=(10, 2))
+        lbl.pack(side="left")
+        ctk.CTkFrame(row, height=1, corner_radius=0,
+                     fg_color=C("hover")).pack(side="left", fill="x", expand=True, padx=(8, 0))
         if group_key:
-            lbl.bind("<Button-1>", lambda e, k=group_key: self._toggle_group_collapse(k))
+            for w in (row, lbl):
+                w.bind("<Button-1>", lambda e, k=group_key: self._toggle_group_collapse(k))
 
     def _session_avatar(self, parent, name, is_group=False, size=26):
         """会话列表圆形首字母头像（Discord/QQ 风格）：群聊显示 #，私聊显示昵称首字母。
@@ -4775,7 +4782,7 @@ class ChatApp:
 
     def _contact_context_menu(self, event, cid, name):
         try:
-            menu = tk.Menu(self.root, tearoff=0)
+            menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="取消收藏", command=lambda: self._toggle_contact(cid, name))
             menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -5728,7 +5735,7 @@ class ChatApp:
 
     def _group_context_menu(self, event, key):
         try:
-            menu = tk.Menu(self.root, tearoff=0)
+            menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             muted = self._is_muted(key)
             pinned = self._is_pinned_session(key)
             room = self._sessions.get(key, {}).get("room", "") if self._sessions.get(key) else ""
@@ -5750,7 +5757,7 @@ class ChatApp:
 
     def _dm_context_menu(self, event, s):
         try:
-            menu = tk.Menu(self.root, tearoff=0)
+            menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             fav = self._is_contact(s["cid"])
             menu.add_command(label=("取消收藏" if fav else "★ 收藏联系人"),
                              command=lambda: self._toggle_contact(s["cid"], s["name"]))
@@ -7473,7 +7480,7 @@ class ChatApp:
         body = ctk.CTkLabel(bubble, text=(str(text)[:320] + "…" if _long else text),
                             wraplength=460, justify="left",
                             text_color=(C("mine_text") if mine else C("other_text")),
-                            font=(FONT, 12))
+                            font=(FONT, 13))
         body.pack(anchor="w", padx=12, pady=((2 if show_head else 6), 8))
         if _long:
             ctk.CTkButton(bubble, text="展开全文", width=84, height=22, corner_radius=6,
@@ -8010,7 +8017,7 @@ class ChatApp:
     def _voice_menu(self, event, path):
         """语音消息右键菜单：转发 / 打开位置。"""
         try:
-            menu = tk.Menu(self.root, tearoff=0)
+            menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="转发", command=lambda: self._forward_voice(path))
             menu.add_command(label="打开文件位置", command=lambda: self._open_file_location(path))
             menu.tk_popup(event.x_root, event.y_root)
@@ -8043,7 +8050,7 @@ class ChatApp:
     def _image_menu(self, event, path):
         """图片消息右键菜单：转发 / 保存 / 复制图片 / 打开大图 / 打开位置。"""
         try:
-            menu = tk.Menu(self.root, tearoff=0)
+            menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="转发到…",
                              command=lambda: self._forward_dialog(
                                  [{"type": "file", "path": path,
@@ -8192,7 +8199,7 @@ class ChatApp:
             can_edit = bool(mine and mid and age <= EDIT_WINDOW)
             is_mine_old = bool(mine and mid and age > RECALL_WINDOW)
 
-            menu = tk.Menu(self.root, tearoff=0)
+            menu = tk.Menu(self.root, tearoff=0, font=(FONT, 10))
             menu.add_command(label="复制", command=lambda: self._copy_to_clipboard(text))
             menu.add_command(label="复制为引用", command=lambda: self._copy_as_quote(name, text))
             menu.add_command(label="转发", command=lambda: self._forward_dialog(text))

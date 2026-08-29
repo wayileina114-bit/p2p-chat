@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.3.1"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.3.2"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -236,6 +236,20 @@ def set_appearance(mode, apply_ctk=True):
             ctk.set_appearance_mode("light" if mode != "dark" else "dark")
         except Exception:
             pass
+
+
+def _detect_system_theme():
+    """检测 Windows 系统深浅色（注册表 Personalize 下 AppsUseLightTheme）；失败默认暗色。"""
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                v, _ = winreg.QueryValueEx(k, "AppsUseLightTheme")
+                return "light" if int(v) else "dark"
+        except Exception:
+            pass
+    return "dark"
 
 
 def C(key):
@@ -1714,11 +1728,15 @@ class MqttBackend:
             self._on_accept(data)
         elif kind == "reject":
             self._on_reject(data)
+        elif kind == "req":
+            self._on_req(data)
 
     def _on_offer(self, room, data):
         if data.get("from") == self.cid:
             return
         tid = data.get("id")
+        if not tid or not self._check_ctrl_seen("offer", tid):
+            return  # 多通道下同一 offer 会重复到达，去重只处理一次
         size = int(data.get("size", 0))
         if not tid or size < 0 or size > MAX_FILE:
             return
@@ -1755,6 +1773,52 @@ class MqttBackend:
             p["accepted"] = False
             p["evt"].set()
             self._fire_file(p["room"], "rejected", {"name": p["name"], "msg": "对方拒绝接收"})
+
+    def _on_req(self, data):
+        """接收方请求补发缺失分片：只补自己缺的 idx，多通道下自然去重。"""
+        tid = data.get("id")
+        p = self._pending.get(tid)
+        if p is None or data.get("to") != self.cid or not p.get("accepted"):
+            return
+        idx_list = data.get("idx") or []
+        idx_list = [int(x) for x in idx_list if str(x).isdigit()]
+        if not idx_list:
+            return
+        threading.Thread(target=self._resend_chunks, args=(tid, idx_list), daemon=True).start()
+
+    def _resend_chunks(self, tid, idx_list):
+        """重新发布指定分片（补发请求；仅发送缺失部分，不整包重传）。"""
+        p = self._pending.get(tid)
+        if p is None:
+            return
+        room = p["room"]
+        data_topic = self._file_topic_base(room) + "/file/data"
+        try:
+            fh = open(p["path"], "rb")
+        except Exception:
+            return
+        try:
+            for i in idx_list:
+                if not self.online or self._client is None:
+                    break
+                if i >= p["total"]:
+                    continue
+                fh.seek(i * CHUNK_SIZE)
+                piece = fh.read(CHUNK_SIZE)
+                if not piece:
+                    continue
+                if p.get("enc") and self.fernet is not None:
+                    piece = self.fernet.encrypt(piece)
+                frame = b"C" + tid.encode("ascii") + struct.pack(">I", i) + piece
+                try:
+                    self._publish_all(data_topic, frame, qos=1, from_outbox=True)
+                except Exception:
+                    break
+        finally:
+            try:
+                fh.close()
+            except Exception:
+                pass
 
     # --------------------------- 文件数据 ---------------------------
 
@@ -1838,18 +1902,39 @@ class MqttBackend:
         })
 
     def _watch_recv(self, tid):
-        """接收方看门狗：超过 RECV_TIMEOUT 仍未收齐数据则清理残留，避免内存/磁盘泄漏。"""
-        time.sleep(RECV_TIMEOUT)
+        """接收方看门狗：每 6 秒向发送方请求缺失分片（应对公共 broker 丢包），
+        超过 RECV_TIMEOUT 仍未收齐则清理残留，避免内存/磁盘泄漏。"""
         r = self._receivers.get(tid)
         if r is None:
             return
-        self._receivers.pop(tid, None)
-        try:
-            r["fh"].close()
-        except Exception:
-            pass
-        self._cleanup_part(r.get("tmp"))
-        self._fire_file(r["room"], "error", {"name": r["name"], "msg": "接收超时，传输中断"})
+        start = time.time()
+        next_req = time.time() + 6
+        while self.running:
+            r = self._receivers.get(tid)
+            if r is None:
+                return  # 已收齐（_finish 清理）或已被取消
+            if r.get("got", 0) >= r.get("total", 0):
+                return
+            now = time.time()
+            if now >= next_req:
+                next_req = now + 6
+                try:
+                    missing = [i for i in range(r["total"]) if i not in r["received"]]
+                    if missing and r.get("from"):
+                        self._publish_ctrl(r["room"], {"kind": "req", "id": tid,
+                                                       "to": r["from"], "idx": missing})
+                except Exception:
+                    pass
+            if now - start >= RECV_TIMEOUT:
+                self._receivers.pop(tid, None)
+                try:
+                    r["fh"].close()
+                except Exception:
+                    pass
+                self._cleanup_part(r.get("tmp"))
+                self._fire_file(r["room"], "error", {"name": r["name"], "msg": "接收超时，传输中断"})
+                return
+            time.sleep(0.5)
 
     # --------------------------- 对外方法 ---------------------------
 
@@ -2019,6 +2104,10 @@ class MqttBackend:
     def _publish_presence(self):
         if self._client is None:
             return
+        if getattr(self, "hidden", False):
+            # 隐身模式：广播空 presence（retain 置空），其他客户端会把我从在线名单移除
+            self._publish_all(self._topic_presence(), b"", qos=1, retain=True)
+            return
         payload = json.dumps({
             "name": self.nickname,
             "rooms": list(self.rooms.keys()),
@@ -2028,10 +2117,12 @@ class MqttBackend:
         self._publish_all(self._topic_presence(), payload, qos=1, retain=True)
 
     def _publish_ctrl(self, room, obj):
+        """文件控制消息（offer/accept/reject）走多通道发布，单通道丢失时由其他通道送达。"""
         if self._client is None:
             return
-        self._client.publish(self._file_topic_base(room) + "/file/ctrl",
-                             json.dumps(obj, ensure_ascii=False), qos=1)
+        topic = self._file_topic_base(room) + "/file/ctrl"
+        payload = json.dumps(obj, ensure_ascii=False)
+        self._publish_all(topic, payload, qos=1, from_outbox=False)
 
     def change_nick(self, new):
         new = (new or "").strip() or "匿名"
@@ -2240,6 +2331,7 @@ class MqttBackend:
             thumb = _make_thumb_base64(path)
             if thumb:
                 offer["thumb"] = thumb
+        self._pending[tid]["offer"] = offer  # 副本：10 秒未应答时重发
         self._publish_ctrl(room, offer)
         threading.Thread(target=self._watch_send, args=(tid,), daemon=True).start()
         self._fire_file(room, "waiting", {"name": name, "size": size, "tid": tid, "path": path, "mime": mime})
@@ -2282,6 +2374,7 @@ class MqttBackend:
             "total": data["total"], "md5": data["md5"],
             "received": set(), "got": 0, "fh": fh, "tmp": tmp,
             "sname": data.get("sname", "对方"), "room": room, "enc": data.get("enc"),
+            "from": data.get("from", ""),  # 发送者 cid：缺失分片时向其请求补发
         }
         threading.Thread(target=self._watch_recv, args=(tid,), daemon=True).start()
         self._publish_ctrl(room, {"kind": "accept", "id": tid, "from": self.cid, "to": data["from"]})
@@ -2692,7 +2785,19 @@ class MqttBackend:
         p = self._pending.get(tid)
         if p is None:
             return
-        p["evt"].wait(OFFER_TIMEOUT)
+        # 10 秒未收到应答：重发一次 offer（防止单通道把请求弄丢，公共 broker 常见）
+        if not p["evt"].wait(10):
+            p = self._pending.get(tid)
+            if p is not None and not p.get("accepted") and not p.get("sent_via_lan"):
+                try:
+                    if p.get("offer"):
+                        self._publish_ctrl(p["room"], p["offer"])
+                except Exception:
+                    pass
+        p = self._pending.get(tid)
+        if p is None:
+            return
+        p["evt"].wait(max(0, OFFER_TIMEOUT - 10))
         p = self._pending.get(tid)
         if p is None:
             return
@@ -2733,7 +2838,11 @@ class MqttBackend:
                     piece = self.fernet.encrypt(piece)
                 frame = b"C" + tid.encode("ascii") + struct.pack(">I", i) + piece
                 try:
-                    self._client.publish(data_topic, frame, qos=1)
+                    # 多通道发布：主 + 辅助 broker 都发，接收端按 idx 去重。
+                    # 分片是海量二进制数据，绝不进文字补发队列（from_outbox=True），
+                    # 否则断网时会用 512KB 分片塞满 outbox 拖垮所有文字消息甚至内存崩溃。
+                    # 丢失的分片由接收端周期「请求补发」（见 _watch_recv / _on_req）兜底。
+                    self._publish_all(data_topic, frame, qos=1, from_outbox=True)
                 except Exception:
                     self._pending.pop(tid, None)
                     self._fire_file(room, "error", {"name": name, "msg": "发送出错"})
@@ -2827,6 +2936,11 @@ class ChatApp:
         self._avatar = avatar
         self._bio = bio
         self.appearance = _APPEARANCE
+        self._appearance_mode = str(_load_settings().get("appearance_mode", "system") or "system").strip()
+        if self._appearance_mode == "system":
+            self.appearance = _detect_system_theme()
+        elif self._appearance_mode in THEMES:
+            self.appearance = self._appearance_mode
         self.backend = None
         self._peers = {}            # cid -> {"name":.., "rooms":[..]}
         self._rooms = []            # 已加入房间（有序）
@@ -2842,6 +2956,7 @@ class ChatApp:
         self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
         self._new_msg_floating = None  # “↓ 新消息”浮标（用户上翻时新消息到达提示）
         self._search_query = ""      # 会话内消息搜索关键词（空 = 未搜索）
+        self._feed_filter = ""       # 消息筛选："" 全部 / "img" 只看图片 / "file" 只看文件
         self._msg_search_after = None  # 消息搜索防抖 timer id
         self._suppress_auto_scroll = False  # 全量渲染时抑制逐条自动滚动，避免布局抖动/残影
         self._window_focused = True    # 窗口是否聚焦（后台/最小化时不聚焦，用于弹通知）
@@ -2850,6 +2965,7 @@ class ChatApp:
         self._members_visible = False  # 成员列表面板是否展开
         self._reply_to = None          # 正在引用的消息 {"name":..,"text":..}
         self._dnd = False              # 免打扰（静音通知+提示音）
+        self._ghost = False             # 隐身模式（不广播在线状态，仍可收发消息）
         self._muted = set(_load_settings().get("muted_sessions", []) or [])  # 静音会话 key 集合
         self._lan_peers = {}          # 同网段自动发现的成员：cid -> {name, lan_ip, rooms}
         self._pinned_sessions = set(_load_settings().get("pinned_sessions", []) or [])  # 置顶会话 key 集合
@@ -2949,6 +3065,11 @@ class ChatApp:
                                        text_color=C("text_2"), font=(FONT, 14),
                                        command=self._toggle_dnd)
         self.dnd_btn.pack(side="right", padx=(0, 8), pady=12)
+        self.ghost_btn = ctk.CTkButton(top, text="🙂", width=40, height=32, corner_radius=8,
+                                       fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                       text_color=C("text_2"), font=(FONT, 14),
+                                       command=self._toggle_ghost)
+        self.ghost_btn.pack(side="right", padx=(0, 8), pady=12)
 
         self.top_avatar = ctk.CTkLabel(top, text="", width=34, height=34,
                                        corner_radius=17, fg_color=C("input_bg"), cursor="hand2")
@@ -3038,6 +3159,23 @@ class ChatApp:
                                          fg_color=C("input_bg"), text_color=C("text_2"),
                                          hover_color=C("input_hover"), command=self._mark_all_read)
         self.readall_btn.pack(side="right", padx=(0, 6))
+        # 消息筛选：只看图片 / 只看文件（QQ 式）
+        _fimg_on = self._feed_filter == "img"
+        _ffile_on = self._feed_filter == "file"
+        self.filter_img_btn = ctk.CTkButton(
+            self.title_row, text="🖼 图片", width=62, height=26, corner_radius=8,
+            font=(FONT, 11),
+            fg_color=(C("accent") if _fimg_on else C("input_bg")),
+            text_color=("#ffffff" if _fimg_on else C("text_2")),
+            hover_color=C("input_hover"), command=lambda: self._toggle_feed_filter("img"))
+        self.filter_img_btn.pack(side="right", padx=(0, 6))
+        self.filter_file_btn = ctk.CTkButton(
+            self.title_row, text="📎 文件", width=62, height=26, corner_radius=8,
+            font=(FONT, 11),
+            fg_color=(C("accent") if _ffile_on else C("input_bg")),
+            text_color=("#ffffff" if _ffile_on else C("text_2")),
+            hover_color=C("input_hover"), command=lambda: self._toggle_feed_filter("file"))
+        self.filter_file_btn.pack(side="right", padx=(0, 6))
 
         # 成员列表面板（默认隐藏，点「👥 成员」开关）
         self.members_frame = ctk.CTkFrame(right, corner_radius=8, fg_color=C("panel"))
@@ -3180,7 +3318,8 @@ class ChatApp:
             help_menu.add_command(label="检查更新", command=self._manual_check_update)
             help_menu.add_command(label="环境检测 / 关于", command=self._show_about)
             help_menu.add_separator()
-            help_menu.add_command(label="导出当前会话记录", command=self._export_current_history)
+            help_menu.add_command(label="导出当前会话记录（TXT）", command=self._export_current_history)
+            help_menu.add_command(label="导出当前会话记录（网页 HTML）", command=self._export_current_history_html)
             help_menu.add_command(label="我的名片…", command=self._show_my_card)
             help_menu.add_command(label="扫名片…", command=self._scan_card)
             help_menu.add_command(label="网络测速…", command=self._measure_network)
@@ -3243,6 +3382,18 @@ class ChatApp:
             win.attributes("-topmost", True)
             ctk.CTkLabel(win, text="设置中心", font=(FONT, 15, "bold"),
                          text_color=C("text")).pack(pady=(16, 6))
+
+            ctk.CTkLabel(win, text="外观", font=(FONT, 11),
+                         text_color=C("text_mute")).pack(anchor="w", padx=26, pady=(8, 2))
+            _am_lbl = {"system": "跟随系统", "dark": "深色", "light": "浅色"}.get(
+                self._appearance_mode, "跟随系统")
+            _mode_var = ctk.StringVar(value=_am_lbl)
+            ctk.CTkSegmentedButton(
+                win, values=["跟随系统", "深色", "浅色"], variable=_mode_var,
+                font=(FONT, 11), height=30,
+                selected_color=C("accent"), selected_hover_color=C("accent_hover"),
+                unselected_color=C("input_bg"), unselected_hover_color=C("input_hover"),
+                command=self._apply_appearance_mode).pack(fill="x", padx=26, pady=(2, 4))
 
             popup_var = tk.BooleanVar(value=self.notify_popup)
             ctk.CTkCheckBox(win, text="Windows 通知弹窗", variable=popup_var,
@@ -3347,11 +3498,49 @@ class ChatApp:
             pass
         self._set_status("已开启免打扰" if self._dnd else "已关闭免打扰", "ok")
 
+    def _toggle_ghost(self):
+        """隐身模式开关：不广播在线状态（对方看到你离线），但仍可收发消息。"""
+        self._ghost = not self._ghost
+        try:
+            if self.backend:
+                self.backend.hidden = self._ghost
+                self.backend._publish_presence()
+        except Exception:
+            pass
+        try:
+            self.ghost_btn.configure(
+                text=("🙈" if self._ghost else "🙂"),
+                fg_color=(C("accent") if self._ghost else C("input_bg")))
+        except Exception:
+            pass
+        self._set_status(
+            "已开启隐身：对方看不到你在线（仍可收发消息）" if self._ghost else "已关闭隐身：恢复在线状态广播",
+            "accent" if self._ghost else "ok")
+
+    def _apply_appearance_mode(self, label):
+        """设置中心「外观」三选：跟随系统 / 深色 / 浅色。"""
+        try:
+            mapping = {"跟随系统": "system", "深色": "dark", "浅色": "light"}
+            mode = mapping.get(str(label), str(label))
+            if mode == "system":
+                self._appearance_mode = "system"
+                _update_settings("appearance_mode", "system")
+                self._set_theme(_detect_system_theme())
+                self._appearance_mode = "system"  # 保持跟随状态（_set_theme 会改掉）
+            else:
+                self._appearance_mode = mode
+                _update_settings("appearance_mode", mode)
+                self._set_theme(mode)
+        except Exception:
+            pass
+
     def _set_theme(self, mode):
         if mode not in THEMES or mode == self.appearance:
             return
         self.appearance = mode
+        self._appearance_mode = mode
         _update_settings("appearance", mode)
+        _update_settings("appearance_mode", mode)
         try:
             self._set_status("正在切换主题…", "mute")
         except Exception:
@@ -4663,9 +4852,10 @@ class ChatApp:
                             ["netsh", "advfirewall", "firewall", "add", "rule",
                              f"name={rule}", "dir=in", "action=allow", "protocol=TCP",
                              f"localport={port}", "profile=any"],
-                            capture_output=True, text=True, timeout=10,
+                            capture_output=True, text=False, timeout=10,  # bytes 输出，防 GBK 解码崩溃
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
-                        msgs.append((port, r.returncode, (r.stdout or r.stderr or "").strip()))
+                        _out = ((r.stdout or b"") + (r.stderr or b"")).decode("utf-8", "replace").strip()
+                        msgs.append((port, r.returncode, _out))
                         if r.returncode != 0:
                             ok = False
                     except Exception as e:
@@ -4706,43 +4896,99 @@ class ChatApp:
         except Exception:
             self._set_status(f"无法连接服务器 {host}:{port}", "err")
 
-    def _export_current_history(self):
-        """把当前会话的聊天记录导出为 txt 文件。"""
+    def _export_current_history(self, html=False):
+        """把当前会话的聊天记录导出为 txt（默认）或 html 网页文件。"""
         s = self._sessions.get(self._current)
         if s is None:
             self._set_status("当前没有选中的会话", "err")
             return
         try:
             from tkinter import filedialog
-            path = filedialog.asksaveasfilename(
-                title="导出聊天记录", defaultextension=".txt",
-                initialfile=f"聊天记录_{s.get('name', '会话')}.txt",
-                filetypes=[("文本文件", "*.txt")])
+            if html:
+                path = filedialog.asksaveasfilename(
+                    title="导出聊天记录（网页）", defaultextension=".html",
+                    initialfile=f"聊天记录_{s.get('name', '会话')}.html",
+                    filetypes=[("网页文件", "*.html")])
+            else:
+                path = filedialog.asksaveasfilename(
+                    title="导出聊天记录", defaultextension=".txt",
+                    initialfile=f"聊天记录_{s.get('name', '会话')}.txt",
+                    filetypes=[("文本文件", "*.txt")])
         except Exception:
             path = ""
         if not path:
             return
         try:
             head_time = time.strftime("%Y-%m-%d %H:%M:%S")
-            lines = [f"===== {s.get('name', '会话')} 聊天记录 =====",
-                     f"导出时间：{head_time}", ""]
-            for m in s["messages"]:
-                ts = _fmt_time(m.get("ts"))
-                name = str(m.get("name", "?"))
-                text = str(m.get("text", ""))
-                if m.get("system"):
-                    lines.append(f"[系统] {text}")
-                elif m.get("recalled"):
-                    lines.append(f"[{ts}] {name}：（已撤回）")
-                elif m.get("img_path"):
-                    lines.append(f"[{ts}] {name}：[图片] {text}")
-                else:
-                    lines.append(f"[{ts}] {name}：{text}")
-            with open(path, "w", encoding="utf-8") as fh:
-                fh.write("\n".join(lines))
+            if html:
+                self._write_history_html(path, s, head_time)
+            else:
+                lines = [f"===== {s.get('name', '会话')} 聊天记录 =====",
+                         f"导出时间：{head_time}", ""]
+                for m in s["messages"]:
+                    ts = _fmt_time(m.get("ts"))
+                    name = str(m.get("name", "?"))
+                    text = str(m.get("text", ""))
+                    if m.get("system"):
+                        lines.append(f"[系统] {text}")
+                    elif m.get("recalled"):
+                        lines.append(f"[{ts}] {name}：（已撤回）")
+                    elif m.get("img_path"):
+                        lines.append(f"[{ts}] {name}：[图片] {text}")
+                    else:
+                        lines.append(f"[{ts}] {name}：{text}")
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(lines))
             self._set_status(f"已导出到 {path}", "ok")
         except Exception:
-            self._set_status("导出失败", "err")
+            pass
+
+    def _export_current_history_html(self):
+        self._export_current_history(html=True)
+
+    def _write_history_html(self, path, s, head_time):
+        """把会话记录写成带气泡样式的单文件 HTML（双击即看，无外部依赖）。"""
+        def _esc(t):
+            import html as _h
+            return _h.escape(str(t or ""))
+        rows = []
+        for m in s["messages"]:
+            ts = _fmt_time(m.get("ts"))
+            name = _esc(m.get("name", "?"))
+            mine = bool(m.get("mine"))
+            cls = "mine" if mine else "other"
+            if m.get("system"):
+                rows.append(f'<div class="sys">[系统] {_esc(m.get("text",""))}</div>')
+                continue
+            if m.get("recalled"):
+                rows.append(f'<div class="sys">[{ts}] {name}：（已撤回）</div>')
+                continue
+            body = _esc(m.get("text", "")).replace("\n", "<br>")
+            tag = f'<img src="file:///{m["img_path"]}" alt="图片">' if m.get("img_path") else body
+            if m.get("voice"):
+                tag = "🎤 [语音消息]"
+            rows.append(
+                f'<div class="row {cls}"><div class="meta">{name} · {ts}</div>'
+                f'<div class="bubble">{tag}</div></div>')
+        css = """
+        body{font-family:'Microsoft YaHei',sans-serif;max-width:760px;margin:24px auto;background:#1e1f22;color:#dbdee1;padding:0 16px}
+        h1{font-size:18px;border-bottom:1px solid #333;padding-bottom:8px}
+        .meta{font-size:11px;color:#949ba4;margin-bottom:2px}
+        .row{display:flex;flex-direction:column;margin:8px 0}
+        .row.mine{align-items:flex-end}.row.other{align-items:flex-start}
+        .bubble{max-width:70%;padding:8px 12px;border-radius:12px;font-size:14px;word-break:break-all}
+        .mine .bubble{background:#5865f2;color:#fff}
+        .other .bubble{background:#2b2d31;color:#dbdee1}
+        .sys{text-align:center;color:#949ba4;font-size:12px;margin:10px 0}
+        img{max-width:260px;border-radius:8px}
+        """
+        doc = (f"<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
+               f"<title>{_esc(s.get('name','会话'))} 聊天记录</title>"
+               f"<style>{css}</style></head><body>"
+               f"<h1>{_esc(s.get('name','会话'))} · 聊天记录（导出于 {_esc(head_time)}）</h1>"
+               + "".join(rows) + "</body></html>")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(doc)
 
     def _clear_current_history(self):
         s = self._sessions.get(self._current)
@@ -4955,6 +5201,26 @@ class ChatApp:
             self._apply_session_list()
             self._update_window_title()
             self._set_status("已全部标为已读" if n else "当前没有未读消息", "ok")
+        except Exception:
+            pass
+
+    def _toggle_feed_filter(self, kind):
+        """消息筛选开关：只看图片 / 只看文件（再点取消，可与搜索叠加）。"""
+        try:
+            self._feed_filter = "" if self._feed_filter == kind else kind
+            for k, btn in (("img", getattr(self, "filter_img_btn", None)),
+                           ("file", getattr(self, "filter_file_btn", None))):
+                if btn is None:
+                    continue
+                on = self._feed_filter == k
+                try:
+                    btn.configure(fg_color=(C("accent") if on else C("input_bg")),
+                                  text_color=("#ffffff" if on else C("text_2")))
+                except Exception:
+                    pass
+            self._render_feed()
+            if self._feed_filter:
+                self._set_status(f"筛选：只看{'图片' if self._feed_filter == 'img' else '文件'}（再次点击取消）", "accent")
         except Exception:
             pass
 
@@ -6204,13 +6470,27 @@ class ChatApp:
 
     def _refresh_peers(self, peers):
         self._peers = peers or {}
-        for s in self._sessions.values():
-            if s["kind"] == "dm":
-                s["online"] = s["cid"] in self._peers
-        self._schedule_session_list()
-        self._update_chat_title()
-        self._refresh_members()
-        self._refresh_status_bar()
+        # 防抖：presence 连串更新（多通道同时到达/多人同时上线）合并为一次界面刷新，
+        # 避免每收到一条在线状态就重建成员面板/会话列表导致卡顿
+        if getattr(self, "_peers_after", None) is not None:
+            try:
+                self.root.after_cancel(self._peers_after)
+            except Exception:
+                pass
+        self._peers_after = self.root.after(200, self._apply_peers_ui)
+
+    def _apply_peers_ui(self):
+        try:
+            self._peers_after = None
+            for s in self._sessions.values():
+                if s["kind"] == "dm":
+                    s["online"] = s["cid"] in self._peers
+            self._schedule_session_list()
+            self._update_chat_title()
+            self._refresh_members()
+            self._refresh_status_bar()
+        except Exception:
+            pass
 
     # --------------------------- 界面更新 ---------------------------
 
@@ -7300,22 +7580,31 @@ class ChatApp:
             pass
 
     def _finish_multi_forward(self):
-        """收集已选消息文本，转发。"""
+        """收集已选消息（文字 / 图片 / 文件），转发。"""
         try:
             s = self._sessions.get(self._current)
-            texts = []
+            items = []
             if s:
                 for m in s["messages"]:
                     mid = m.get("mid")
                     if mid and mid in self._multi_selected:
-                        t = str(m.get("text", "")).strip()
-                        if t and not m.get("system"):
-                            texts.append(t)
+                        p = None
+                        if m.get("img_path") and os.path.isfile(m["img_path"]):
+                            p = m["img_path"]
+                        elif m.get("file_path") and os.path.isfile(m["file_path"]):
+                            p = m["file_path"]
+                        if p:
+                            items.append({"type": "file", "path": p,
+                                          "label": os.path.basename(p)})
+                        else:
+                            t = str(m.get("text", "")).strip()
+                            if t and not m.get("system"):
+                                items.append(t)
             self._exit_multi_select()
-            if texts:
-                self._forward_dialog(texts)
+            if items:
+                self._forward_dialog(items)
             else:
-                self._set_status("没有选中可转发的文字消息", "err")
+                self._set_status("没有选中可转发的消息", "err")
         except Exception:
             self._exit_multi_select()
 
@@ -7336,21 +7625,20 @@ class ChatApp:
         except Exception:
             pass
 
-    def _forward_dialog(self, text):
-        """弹出转发目标选择框，把文本转发到指定会话。"""
+    def _forward_dialog(self, items):
+        """弹出转发目标选择框，转发文字 / 图片 / 文件到指定会话。"""
         try:
-            if isinstance(text, list):
-                texts = [t for t in text if t and str(t).strip()]
-            else:
-                texts = [text]
+            if isinstance(items, str):
+                items = [items]
+            items = [it for it in (items or []) if it]
             win = ctk.CTkToplevel(self.root)
             win.title("转发到…")
             win.geometry("360x440")
             win.resizable(False, False)
             win.attributes("-topmost", True)
             label = "选择转发目标"
-            if len(texts) > 1:
-                label = f"选择转发目标（{len(texts)} 条消息）"
+            if len(items) > 1:
+                label = f"选择转发目标（{len(items)} 条消息）"
             ctk.CTkLabel(win, text=label, font=(FONT, 13, "bold"),
                          text_color=C("text")).pack(pady=(14, 4))
             scroll = ctk.CTkScrollableFrame(win, fg_color="transparent")
@@ -7359,18 +7647,18 @@ class ChatApp:
                 ctk.CTkButton(scroll, text=f"# {room}", height=32, corner_radius=8,
                               anchor="w", fg_color=C("input_bg"), text_color=C("text"),
                               hover_color=C("input_hover"), font=(FONT, 12),
-                              command=lambda r=room: self._do_forward(r, texts, False, win)).pack(fill="x", pady=2)
+                              command=lambda r=room: self._do_forward(r, items, False, win)).pack(fill="x", pady=2)
             for s in list(self._sessions.values()):
                 if s.get("kind") == "dm":
                     ctk.CTkButton(scroll, text=f"@ {s['name']}", height=32, corner_radius=8,
                                   anchor="w", fg_color=C("input_bg"), text_color=C("text"),
                                   hover_color=C("input_hover"), font=(FONT, 12),
-                                  command=lambda s=s: self._do_forward(s["cid"], texts, True, win)).pack(fill="x", pady=2)
+                                  command=lambda s=s: self._do_forward(s["cid"], items, True, win)).pack(fill="x", pady=2)
             win.bind("<Escape>", lambda e: win.destroy())
         except Exception:
             pass
 
-    def _do_forward(self, target, texts, is_dm, win):
+    def _do_forward(self, target, items, is_dm, win):
         try:
             win.destroy()
         except Exception:
@@ -7378,23 +7666,38 @@ class ChatApp:
         if not (self.backend and self.backend.online):
             self._set_status("未连接，无法转发", "err")
             return
-        if isinstance(texts, str):
-            texts = [texts]
-        texts = [str(t) for t in (texts or []) if str(t or "").strip()]
-        if not texts:
+        if isinstance(items, str):
+            items = [items]
+        items = [it for it in (items or []) if it]
+        if not items:
             self._set_status("没有可转发的消息", "err")
             return
         my = self.nick_var.get().strip() or "未命名"
         ok = 0
-        for t in texts:
-            if is_dm:
-                if self.backend.send_dm(target, t):
-                    self._append_message(self._dm_key(target), my, t, True)
-                    ok += 1
-            else:
-                if self.backend.send_text(target, t):
-                    ok += 1
-        self._set_status(f"已转发 {ok}/{len(texts)} 条", "ok" if ok else "err")
+        total = len(items)
+        for it in items:
+            try:
+                if isinstance(it, dict) and it.get("path") and os.path.isfile(it["path"]):
+                    if is_dm:
+                        if self.backend.send_file_dm(target, it["path"]):
+                            ok += 1
+                    else:
+                        if self.backend.send_file(target, it["path"]):
+                            ok += 1
+                else:
+                    t = str(it).strip()
+                    if not t:
+                        continue
+                    if is_dm:
+                        if self.backend.send_dm(target, t):
+                            self._append_message(self._dm_key(target), my, t, True)
+                            ok += 1
+                    else:
+                        if self.backend.send_text(target, t):
+                            ok += 1
+            except Exception:
+                pass
+        self._set_status(f"已转发 {ok}/{total} 条", "ok" if ok else "err")
 
     def _edit_message_dialog(self, mid, text):
         """弹出编辑消息对话框（预填原文，保存后提交编辑）。"""
@@ -7580,6 +7883,16 @@ class ChatApp:
                          text_color=C("text_mute"), font=(FONT, 11)).pack(pady=20)
             return
         msgs = s["messages"]
+        if self._feed_filter == "img":
+            msgs = [m for m in msgs if m.get("img_path")]
+        elif self._feed_filter == "file":
+            msgs = [m for m in msgs if m.get("file_path")]
+        if self._feed_filter and not msgs:
+            ctk.CTkLabel(self.feed,
+                         text=f"（当前会话没有{'图片' if self._feed_filter == 'img' else '文件'}消息）",
+                         text_color=C("text_mute"), font=(FONT, 11)).pack(pady=24)
+            self._update_chat_title()
+            return
         if self._search_query:
             q = self._search_query.lower()
             msgs = [m for m in msgs if
@@ -7862,6 +8175,14 @@ class ImagePreview:
         top.title("图片预览")
         top.configure(fg_color=C("app_bg"))
         top.resizable(False, False)
+        # 预览窗口必须浮在最上层（QQ/微信看图行为），否则点开后可能被主窗口盖住
+        try:
+            top.attributes("-topmost", True)
+            top.lift()
+            top.focus_force()
+            top.after(30, lambda: (top.lift(), top.focus_force()))
+        except Exception:
+            pass
 
         ctk.CTkLabel(top, text=os.path.basename(path), text_color=C("text_2"),
                      font=(FONT, 11)).pack(padx=20, pady=(12, 4))
@@ -8517,8 +8838,11 @@ def main():
     _install_excepthook()
     if not _ensure_deps():
         return
-    # 读取上次保存的主题（默认暗色），与 C() 颜色体系保持一致
+    # 读取上次保存的主题（默认跟随系统），与 C() 颜色体系保持一致
+    _mode = str(_load_settings().get("appearance_mode", "system") or "system").strip()
     _appearance = str(_load_settings().get("appearance", "dark")).strip()
+    if _mode == "system":
+        _appearance = _detect_system_theme()
     set_appearance(_appearance)
     ctk.set_default_color_theme("blue")
     try:

@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.3.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -843,6 +843,113 @@ def _notify_windows(title, msg):
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# 任务栏未读角标（Windows 7+ 通过 ITaskbarList3.SetOverlayIcon 显示红色数字徽标）
+# ---------------------------------------------------------------------------
+_TASKBAR3 = None  # 惰性初始化：None=未尝试 / False=失败 / dict=成功（含 COM 指针）
+
+
+def _taskbar3_init():
+    """初始化 ITaskbarList3 COM 接口（惰性，失败静默返回 False）。"""
+    global _TASKBAR3
+    if _TASKBAR3 is not None:
+        return _TASKBAR3
+    if os.name != "nt":
+        _TASKBAR3 = False
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class _GUID2(ctypes.Structure):
+            _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD),
+                        ("Data3", wintypes.WORD), ("Data4", ctypes.c_ubyte * 8)]
+
+        # CLSID_TaskbarList / IID_ITaskbarList3
+        CLSID_TaskbarList = _GUID2(0x56FDF344, 0xFD6D, 0x11D0,
+                                   (0x95, 0x8A, 0x00, 0x60, 0x97, 0xC9, 0xA0, 0x90))
+        IID_ITaskbarList3 = _GUID2(0xEA1AFB91, 0x9E28, 0x4B86,
+                                   (0x90, 0xE9, 0x9E, 0x9F, 0x8A, 0x5E, 0xEF, 0xAF))
+        ppv = ctypes.c_void_p()
+        hr = ctypes.windll.ole32.CoCreateInstance(
+            ctypes.byref(CLSID_TaskbarList), None, 1,  # CLSCTX_INPROC_SERVER
+            ctypes.byref(IID_ITaskbarList3), ctypes.byref(ppv))
+        if hr != 0 or not ppv.value:
+            _TASKBAR3 = False
+            return False
+        _TASKBAR3 = {
+            "ppv": ppv,
+            "vtbl": ctypes.cast(ppv, ctypes.POINTER(ctypes.c_void_p)).contents,
+        }
+        return _TASKBAR3
+    except Exception:
+        _TASKBAR3 = False
+        return False
+
+
+def _taskbar3_set_overlay(hwnd, hicon, desc="未读消息"):
+    """给任务栏按钮设置角标图标（hicon 为 0 时清除角标）。"""
+    tb = _taskbar3_init()
+    if not tb:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        vtbl = tb["vtbl"]
+        # ITaskbarList::HrInit（vtable 第 4 项）
+        hrinit = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(vtbl[3])
+        hrinit(tb["ppv"])
+        # ITaskbarList3::SetOverlayIcon（vtable 第 19 项）
+        fn = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, wintypes.HWND,
+                                ctypes.c_void_p, wintypes.LPCWSTR)(vtbl[18])
+        hr = fn(tb["ppv"], hwnd, ctypes.c_void_p(int(hicon) if hicon else 0), desc)
+        return hr == 0
+    except Exception:
+        return False
+
+
+def _taskbar3_release():
+    """释放 ITaskbarList3 COM 接口（程序退出时调用）。"""
+    global _TASKBAR3
+    tb = _TASKBAR3
+    if not tb:
+        return
+    try:
+        import ctypes
+        release = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p)(tb["vtbl"][2])
+        release(tb["ppv"])
+    except Exception:
+        pass
+    _TASKBAR3 = None
+
+
+def _build_badge_icon(n):
+    """用 PIL 生成红色圆形未读数字图标，返回 HICON（失败返回 0）。"""
+    try:
+        import ctypes
+        from PIL import Image, ImageDraw, ImageFont
+        size = 32
+        txt = str(n) if n < 100 else "99+"
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse([1, 1, size - 2, size - 2], fill=(255, 59, 48, 255))
+        try:
+            font = ImageFont.truetype("segoeuib.ttf", 20 if len(txt) <= 2 else 15)
+        except Exception:
+            font = ImageFont.load_default()
+        bbox = d.textbbox((0, 0), txt, font=font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        d.text(((size - tw) / 2 - bbox[0], (size - th) / 2 - bbox[1]),
+               txt, font=font, fill=(255, 255, 255, 255))
+        ico = os.path.join(DATA_DIR, "taskbar_badge.ico")
+        img.save(ico, format="ICO", sizes=[(size, size)])
+        # IMAGE_ICON=1, LR_LOADFROMFILE=0x10
+        hicon = ctypes.windll.user32.LoadImageW(None, ico, 1, size, size, 0x00000010)
+        return int(hicon) if hicon else 0
+    except Exception:
+        return 0
 
 
 def _load_rooms():
@@ -2760,6 +2867,12 @@ class ChatApp:
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
         self._body_labels = {}         # mid -> 正文 label（局部更新编辑）
         self._footer_labels = {}       # mid -> 已读/送达/已编辑 标签（局部更新回执）
+        self._hover_bar = None         # 当前悬停快捷操作浮层（同时只存在一个）
+        self._hover_mid = None         # 浮层对应的消息 mid
+        self._hover_after = None       # 浮层显示/隐藏的延时 timer id
+        self._last_badge_n = None      # 上次任务栏角标的未读数（无变化不重绘）
+        self._hover_inside = False      # 鼠标是否仍在悬停目标上
+        self._overlay_hicon = 0        # 当前任务栏角标 HICON（替换前销毁旧句柄）
         self._search_after = None   # 搜索防抖 timer id
         self._list_after = None     # 会话列表防抖 timer id
         self.auto_connect = bool(_load_settings().get("auto_connect", True))
@@ -3243,6 +3356,10 @@ class ChatApp:
             pass
         self._close_emoji_panel()
         self._close_mention_panel()
+        try:
+            self._destroy_hover_bar()
+        except Exception:
+            pass
         for attr in ("_emoji_win", "_mention_win", "_emoji_cv", "_emoji_items",
                      "_emoji_tab_btns", "_emoji_root_bind"):
             try:
@@ -3875,11 +3992,22 @@ class ChatApp:
             fp = [self._current, (self.search_var.get() or ""), len(self._rooms),
                   len(self._sessions), len(self._peers),
                   tuple(sorted((k, s.get("unread", 0), bool(s.get("online")), bool(s.get("@me")),
-                                ((s.get("messages") or [None])[-1].get("mid") if s.get("messages") else None))
+                                ((s.get("messages") or [None])[-1].get("mid") if s.get("messages") else None),
+                                ((s.get("messages") or [None])[-1].get("ts") if s.get("messages") else None))
                                for k, s in self._sessions.items()))]
             return tuple(fp)
         except Exception:
             return None
+
+    def _session_last_ts(self, s):
+        """会话最后一条消息的时间戳（QQ 式按最近活跃排序用）。"""
+        msgs = s.get("messages") or []
+        if not msgs:
+            return 0.0
+        try:
+            return max(float(m.get("ts") or 0) for m in msgs)
+        except Exception:
+            return 0.0
 
     def _apply_session_list(self):
         fp = self._list_fingerprint()
@@ -3892,11 +4020,14 @@ class ChatApp:
         dm_cids = {s["cid"] for s in self._sessions.values() if s["kind"] == "dm" and s["cid"]}
 
         groups = sorted([r for r in self._rooms if (not kw) or kw in r.lower()],
-                         key=lambda r: (0 if self._is_pinned_session(self._group_key(r)) else 1, r))
+                         key=lambda r: (0 if self._is_pinned_session(self._group_key(r)) else 1,
+                                        -self._session_last_ts(self._sessions.get(self._group_key(r)) or {}),
+                                        r))
         dms = sorted([s for s in self._sessions.values()
                       if s["kind"] == "dm" and ((not kw) or kw in s["name"].lower())],
                      key=lambda s: (0 if self._is_pinned_session(s["key"]) else 1,
-                                    -(s.get("unread") or 0), 0 if s["online"] else 1, s["name"]))
+                                    -self._session_last_ts(s),
+                                    -(s.get("unread") or 0), s["name"]))
         online_others = [(cid, p["name"]) for cid, p in self._peers.items()
                          if cid != self.cid and cid not in dm_cids
                          and ((not kw) or kw in p["name"].lower())]
@@ -5568,15 +5699,9 @@ class ChatApp:
         if bubble is None:
             return
         if m and m.get("reactions"):
-            row = ctk.CTkFrame(bubble, fg_color="transparent")
-            row.pack(anchor="e", padx=12, pady=(0, 4))
-            for emo, bucket in m["reactions"].items():
-                n = len(bucket) if isinstance(bucket, dict) else int(bucket)
-                if n <= 0:
-                    continue
-                ctk.CTkLabel(row, text=f"{emo} {n}", text_color=C("text_mute"),
-                             font=(FONT, 9)).pack(side="left", padx=2)
-            self._reaction_rows[mid] = row
+            row = self._build_reaction_row(bubble, m.get("reactions"), mid)
+            if row is not None:
+                self._reaction_rows[mid] = row
 
     def _refresh_message_badge(self, mid):
         """局部刷新单条消息的正文/回执/回应，避免整页重渲染（性能优化）。"""
@@ -5968,6 +6093,29 @@ class ChatApp:
             if base != self._last_title:
                 self._last_title = base
                 self.root.title(base)
+            self._update_taskbar_badge()
+        except Exception:
+            pass
+
+    def _update_taskbar_badge(self):
+        """按总未读数更新任务栏图标角标（Windows 7+ 红色数字徽标）。"""
+        if os.name != "nt":
+            return
+        try:
+            n = sum(s.get("unread", 0) for s in self._sessions.values())
+            if n == self._last_badge_n:
+                return
+            self._last_badge_n = n
+            old = self._overlay_hicon
+            hicon = _build_badge_icon(n) if n > 0 else 0
+            _taskbar3_set_overlay(self.root.winfo_id(), hicon)
+            if old and old != hicon:
+                try:
+                    import ctypes
+                    ctypes.windll.user32.DestroyIcon(old)
+                except Exception:
+                    pass
+            self._overlay_hicon = hicon
         except Exception:
             pass
 
@@ -6295,19 +6443,282 @@ class ChatApp:
             footer.pack(anchor="e", padx=12, pady=(0, 4))
             if mid:
                 self._footer_labels[mid] = footer
+            if mid and (read_by or delivered_by):
+                # 点击「已读/已送达」标签 → 消息详情（谁已读 / 谁回应了）
+                footer.configure(cursor="hand2")
+                footer.bind("<Button-1>", lambda e, m=mid: self._show_message_details(m))
         if reactions:
+            row = self._build_reaction_row(bubble, reactions, mid)
+            if mid:
+                self._reaction_rows[mid] = row
+        if mid:
+            # 悬停快捷操作浮层（Discord/QQ 式）：👍 回应 / ↩ 引用 / ⧉ 转发 / 📋 复制
+            for _w in (bubble, body):
+                _w.bind("<Enter>", lambda e, m=mid, b=bubble, n=name, t=text:
+                        self._hover_enter(m, b, n, t), add="+")
+                _w.bind("<Leave>", lambda e, m=mid: self._hover_leave(m), add="+")
+        self._maybe_scroll_bottom()
+        self._trim_feed()
+
+    # ------------------------- 回应芯片 / 消息详情 / 悬停快捷操作 -------------------------
+
+    def _build_reaction_row(self, bubble, react, mid):
+        """回应芯片行：每个芯片可点击切换「我」的回应（我回应过的高亮 accent），
+        行尾 "+" 打开快捷表情面板；右键芯片查看该表情回应名单。"""
+        try:
             row = ctk.CTkFrame(bubble, fg_color="transparent")
-            row.pack(anchor="e", padx=12, pady=(0, 4))
-            for emo, bucket in reactions.items():
+            react = react or {}
+            for emo, bucket in react.items():
                 n = len(bucket) if isinstance(bucket, dict) else int(bucket)
                 if n <= 0:
                     continue
-                ctk.CTkLabel(row, text=f"{emo} {n}", text_color=C("text_mute"),
-                             font=(FONT, 9)).pack(side="left", padx=2)
-            if mid:
-                self._reaction_rows[mid] = row
-        self._maybe_scroll_bottom()
-        self._trim_feed()
+                mine_r = isinstance(bucket, dict) and self.cid in bucket
+                chip = ctk.CTkButton(
+                    row, text=f"{emo} {n}", height=24, corner_radius=12,
+                    fg_color=(C("accent") if mine_r else C("input_bg")),
+                    hover_color=(C("accent_hover") if mine_r else C("input_hover")),
+                    text_color=("#ffffff" if mine_r else C("text")),
+                    font=(FONT, 10),
+                    command=lambda e=emo: self._do_reaction(mid, e))
+                chip.pack(side="left", padx=2, pady=2)
+                chip.bind("<Button-3>", lambda e, emo=emo: self._show_message_details(mid, emo))
+            plus = ctk.CTkButton(row, text="＋", width=30, height=24, corner_radius=12,
+                                 fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                 text_color=C("text_2"), font=(FONT, 12),
+                                 command=lambda: self._show_quick_reactions(
+                                     mid, self.root.winfo_pointerx(), self.root.winfo_pointery()))
+            plus.pack(side="left", padx=(4, 2), pady=2)
+            return row
+        except Exception:
+            return None
+
+    def _show_quick_reactions(self, mid, x, y):
+        """快捷表情回应面板：在鼠标上方弹出，点一下即回应（可连续点不同表情）。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.overrideredirect(True)
+            win.configure(fg_color=C("panel_2"))
+            win.attributes("-topmost", True)
+            for emo in ["👍", "❤️", "😂", "😮", "😢", "🙏", "🔥", "🎉"]:
+                b = ctk.CTkButton(win, text=emo, width=34, height=34, corner_radius=17,
+                                  fg_color="transparent", hover_color=C("hover"),
+                                  text_color=C("text"), font=(FONT, 16),
+                                  command=lambda e=emo: self._quick_react(mid, e, win))
+                b.pack(side="left", padx=2, pady=4)
+            win.bind("<Escape>", lambda e: win.destroy())
+            win.bind("<FocusOut>", lambda e: win.destroy())
+            win.update_idletasks()
+            w = win.winfo_reqwidth()
+            h = win.winfo_reqheight()
+            sw = win.winfo_screenwidth()
+            px = min(max(x - w // 2, 4), sw - w - 4)
+            py = y - h - 12
+            if py < 4:
+                py = y + 12
+            win.geometry(f"{w}x{h}+{int(px)}+{int(py)}")
+            win.focus_set()
+        except Exception:
+            pass
+
+    def _quick_react(self, mid, emo, win):
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        self._do_reaction(mid, emo)
+
+    def _show_message_details(self, mid, focus_emoji=None):
+        """消息详情弹窗：已读 / 已送达名单 + 各表情回应名单（点已读标签或右键回应芯片打开）。"""
+        try:
+            s = self._sessions.get(self._current)
+            if s is None:
+                return
+            m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+            if m is None:
+                return
+            win = ctk.CTkToplevel(self.root)
+            win.title("消息详情")
+            win.geometry("340x430")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="消息详情", font=(FONT, 14, "bold"),
+                         text_color=C("text")).pack(pady=(14, 4))
+            body = ctk.CTkScrollableFrame(win, fg_color="transparent")
+            body.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+            shown = False
+            rb = m.get("read_by") or []
+            if rb:
+                shown = True
+                ctk.CTkLabel(body, text=f"✅ 已读（{len(rb)} 人）", anchor="w",
+                             font=(FONT, 11, "bold"), text_color=C("online")).pack(anchor="w", pady=(8, 2))
+                ctk.CTkLabel(body, text="、".join(str(x) for x in rb), wraplength=290,
+                             justify="left", font=(FONT, 11), text_color=C("text"),
+                             anchor="w").pack(anchor="w", pady=(0, 6))
+            db = m.get("delivered_by") or []
+            if db:
+                shown = True
+                ctk.CTkLabel(body, text=f"📤 已送达（{len(db)} 人）", anchor="w",
+                             font=(FONT, 11, "bold"), text_color=C("text_mute")).pack(anchor="w", pady=(8, 2))
+                ctk.CTkLabel(body, text="、".join(str(x) for x in db), wraplength=290,
+                             justify="left", font=(FONT, 11), text_color=C("text"),
+                             anchor="w").pack(anchor="w", pady=(0, 6))
+            react = m.get("reactions") or {}
+            if react:
+                shown = True
+                for emo, bucket in react.items():
+                    n = len(bucket) if isinstance(bucket, dict) else int(bucket)
+                    if n <= 0:
+                        continue
+                    names = list(bucket.values()) if isinstance(bucket, dict) else [str(bucket)]
+                    if isinstance(bucket, dict) and self.cid in bucket:
+                        names = [f"{x}（我）" for x in names]
+                    ctk.CTkLabel(body, text=f"{emo}  {n}", anchor="w",
+                                 font=(FONT, 11, "bold"), text_color=C("accent")).pack(anchor="w", pady=(8, 2))
+                    ctk.CTkLabel(body, text="、".join(str(x) for x in names), wraplength=290,
+                                 justify="left", font=(FONT, 11), text_color=C("text"),
+                                 anchor="w").pack(anchor="w", pady=(0, 6))
+            if not shown:
+                ctk.CTkLabel(body, text="（暂无已读 / 回应信息）", text_color=C("text_mute"),
+                             font=(FONT, 11)).pack(pady=20)
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            pass
+
+    # ---- 悬停快捷操作浮层（同时只存在一个，懒创建，离开自动隐藏） ----
+
+    def _hover_enter(self, mid, bubble, name, text):
+        try:
+            self._hover_inside = True
+            self._cancel_hover_after()
+            if self._hover_bar is not None and self._hover_mid == mid:
+                return  # 已显示同一消息的浮层
+            self._hover_mid = mid
+            self._hover_after = self.root.after(
+                180, lambda m=mid, b=bubble, n=name, t=text: self._show_hover_bar(m, b, n, t))
+        except Exception:
+            pass
+
+    def _hover_leave(self, mid):
+        try:
+            self._hover_inside = False
+            self._cancel_hover_after()
+            if self._hover_bar is not None and self._hover_mid == mid:
+                self._hover_after = self.root.after(250, self._destroy_hover_bar)
+        except Exception:
+            pass
+
+    def _show_hover_bar(self, mid, bubble, name, text):
+        """在消息行空白侧显示快捷操作浮层（自己消息→左侧，对方消息→右侧）。"""
+        try:
+            if not getattr(self, "_hover_inside", False):
+                return
+            if getattr(self, "_multi_mode", False):
+                return
+            if bubble is None:
+                return
+            try:
+                if not bubble.winfo_exists():
+                    return
+            except Exception:
+                return
+            self._destroy_hover_bar(keep_state=True)
+            row = bubble.master
+            bar = ctk.CTkFrame(row, corner_radius=8, fg_color=C("panel_2"),
+                               border_width=1, border_color=C("hover"))
+            self._hover_bar = bar
+            self._hover_mid = mid
+            is_mine = bool(self._body_labels.get(mid)) and self._is_mine_bubble(mid)
+            for t, cmd in (("👍", lambda: self._hover_react(mid)),
+                           ("↩", lambda: self._hover_reply(name, text, mid)),
+                           ("⧉", lambda: self._hover_forward(mid)),
+                           ("📋", lambda: self._hover_copy(text))):
+                b = ctk.CTkButton(bar, text=t, width=30, height=24, corner_radius=6,
+                                  fg_color="transparent", hover_color=C("hover"),
+                                  text_color=C("text"), font=(FONT, 12), command=cmd)
+                b.pack(side="left", padx=1, pady=1)
+            if is_mine:
+                bar.place(relx=0.0, x=8, y=2, anchor="nw")
+            else:
+                bar.place(relx=1.0, x=-8, y=2, anchor="ne")
+            bar.bind("<Enter>", lambda e: self._hover_bar_enter())
+            bar.bind("<Leave>", lambda e: self._hover_bar_leave())
+            for _b in bar.winfo_children():
+                _b.bind("<Enter>", lambda e: self._hover_bar_enter(), add="+")
+                _b.bind("<Leave>", lambda e: self._hover_bar_leave(), add="+")
+        except Exception:
+            pass
+
+    def _is_mine_bubble(self, mid):
+        """根据本地会话数据判断某消息是否是自己发的（浮层放左右哪侧用）。"""
+        try:
+            s = self._sessions.get(self._current)
+            if s:
+                m = next((x for x in s["messages"] if x.get("mid") == mid), None)
+                if m is not None:
+                    return bool(m.get("mine"))
+        except Exception:
+            pass
+        return False
+
+    def _hover_bar_enter(self):
+        try:
+            self._hover_inside = True
+            self._cancel_hover_after()
+        except Exception:
+            pass
+
+    def _hover_bar_leave(self):
+        try:
+            self._hover_inside = False
+            self._cancel_hover_after()
+            self._hover_after = self.root.after(250, self._destroy_hover_bar)
+        except Exception:
+            pass
+
+    def _cancel_hover_after(self):
+        if getattr(self, "_hover_after", None) is not None:
+            try:
+                self.root.after_cancel(self._hover_after)
+            except Exception:
+                pass
+            self._hover_after = None
+
+    def _destroy_hover_bar(self, keep_state=False):
+        try:
+            self._cancel_hover_after()
+        except Exception:
+            pass
+        bar = self._hover_bar
+        self._hover_bar = None
+        if not keep_state:
+            self._hover_mid = None
+        if bar is not None:
+            try:
+                bar.destroy()
+            except Exception:
+                pass
+
+    def _hover_react(self, mid):
+        try:
+            x = self.root.winfo_pointerx()
+            y = self.root.winfo_pointery()
+            self._destroy_hover_bar()
+            self._show_quick_reactions(mid, x, y)
+        except Exception:
+            pass
+
+    def _hover_reply(self, name, text, mid):
+        self._destroy_hover_bar()
+        self._start_reply(name, text, mid)
+
+    def _hover_forward(self, mid):
+        self._destroy_hover_bar()
+        self._start_multi_select()
+        self._toggle_multi_select(mid)
+
+    def _hover_copy(self, text):
+        self._destroy_hover_bar()
+        self._copy_to_clipboard(text)
 
     def _mentions_me(self, text):
         """判断消息正文是否 @ 了我（用于高亮）。"""
@@ -7173,6 +7584,18 @@ class ChatApp:
         try:
             if getattr(self, "_playing_voice", None):
                 self._stop_voice_play(self._playing_voice)
+        except Exception:
+            pass
+        try:
+            self._destroy_hover_bar()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_overlay_hicon", 0):
+                import ctypes
+                ctypes.windll.user32.DestroyIcon(self._overlay_hicon)
+                self._overlay_hicon = 0
+            _taskbar3_release()
         except Exception:
             pass
         try:

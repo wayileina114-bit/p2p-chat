@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.4.2"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.4.3"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -4358,11 +4358,14 @@ class ChatApp:
             lbl.bind("<Button-1>", lambda e, k=group_key: self._toggle_group_collapse(k))
 
     def _session_avatar(self, parent, name, is_group=False, size=26):
-        """会话列表圆形首字母头像（Discord/QQ 风格）：群聊显示 #，私聊显示昵称首字母。"""
+        """会话列表圆形首字母头像（Discord/QQ 风格）：群聊显示 #，私聊显示昵称首字母。
+        二次元主题下带樱粉描边。"""
         ch = ("#" if is_group else (str(name or "?")[:1].upper() or "?"))
         fg = C("input_bg") if is_group else _name_color(name or "?")
+        bw, bc = ((2, C("accent")) if _APPEARANCE == "anime" else (0, None))
         av = ctk.CTkLabel(parent, text=ch, width=size, height=size, corner_radius=size // 2,
                           fg_color=fg, text_color="#ffffff", font=(FONT, 12 if is_group else 11, "bold"),
+                          border_width=bw, border_color=bc,
                           cursor="hand2")
         av.pack(side="left", padx=(8, 2), pady=6)
         return av
@@ -4370,7 +4373,7 @@ class ChatApp:
     def _unread_badge(self, parent, n):
         txt = str(n) if n < 100 else "99+"
         w = max(20, 16 + (len(txt) - 1) * 8)
-        return ctk.CTkLabel(parent, text=txt, width=w, height=20, corner_radius=10,
+        return ctk.CTkLabel(parent, text=txt, width=w, height=20, corner_radius=R(10),
                             fg_color=C("danger"), text_color="#ffffff", font=(FONT, 10, "bold"))
 
     def _bind_row_hover(self, row, selected):
@@ -7073,9 +7076,11 @@ class ChatApp:
                 self._avatar_label(row, name, False, AV).pack(side="left")
             else:
                 ctk.CTkFrame(row, width=AV + GAP, height=1, fg_color="transparent").pack(side="left")
+            _anime_edge = (1 if (_APPEARANCE == "anime" and not highlight) else 0)
             bubble = ctk.CTkFrame(row, corner_radius=R(14), fg_color=C("other_bubble"),
-                                   border_width=(2 if highlight else 0),
-                                   border_color=bcolor)
+                                   border_width=(2 if highlight else _anime_edge),
+                                   border_color=(bcolor if highlight else
+                                                 (C("panel_2") if _anime_edge else None)))
             bubble.pack(side="left", padx=(GAP if show_head else 0, 0))
         return bubble
 
@@ -8206,6 +8211,39 @@ class ChatApp:
         self._feed_after = None
         self._render_feed()
 
+    def _render_welcome_page(self):
+        """无会话时的樱花欢迎页（Canvas 绘制：花瓣装饰 + 引导文案）。"""
+        try:
+            import tkinter as _tk2
+            w = max(420, self.feed.winfo_width() or 460)
+            h = 300
+            cv = _tk2.Canvas(self.feed, width=w, height=h, bg=C("app_bg"),
+                             highlightthickness=0)
+            cv.pack(pady=36)
+            # 随机散落的花瓣（固定种子保证稳定）
+            try:
+                import random as _rnd
+                rnd = _rnd.Random(42)
+            except Exception:
+                rnd = None
+            petal_colors = [C("accent"), C("text_mute"), C("section")]
+            for i in range(14):
+                px = rnd.randint(20, w - 20) if rnd else 30 + i * 28
+                py = rnd.randint(14, h - 14) if rnd else 20 + (i * 37) % (h - 40)
+                sz = rnd.randint(3, 7) if rnd else 5
+                col = petal_colors[i % len(petal_colors)]
+                cv.create_oval(px - sz, py - sz // 2, px + sz, py + sz // 2,
+                               fill=col, outline="")
+            cv.create_text(w // 2, h // 2 - 26, text="✿ 欢迎来到 P2P 聊天 ✿",
+                           font=(FONT, 17, "bold"), fill=C("text"))
+            cv.create_text(w // 2, h // 2 + 8, text="在左侧加入房间，或点「💌 私聊」开始聊天",
+                           font=(FONT, 11), fill=C("text_mute"))
+            cv.create_text(w // 2, h // 2 + 34, text="无需服务器 · 免注册 · 端到端加密可选",
+                           font=(FONT, 10), fill=C("text_mute"))
+        except Exception:
+            ctk.CTkLabel(self.feed, text="请在左侧选择或加入一个会话。",
+                         text_color=C("text_mute"), font=(FONT, 11)).pack(pady=20)
+
     def _render_feed(self):
         for w in self.feed.winfo_children():
             w.destroy()
@@ -8218,8 +8256,7 @@ class ChatApp:
         s = self._sessions.get(self._current)
         if s is None:
             self._update_chat_title()
-            ctk.CTkLabel(self.feed, text="请在左侧选择或加入一个会话。",
-                         text_color=C("text_mute"), font=(FONT, 11)).pack(pady=20)
+            self._render_welcome_page()
             return
         msgs = s["messages"]
         if self._feed_filter == "img":

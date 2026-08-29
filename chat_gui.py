@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.2.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.2.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -554,12 +554,22 @@ def _is_voice_name(name):
     return str(name or "").lower().endswith((".wav", ".mp3", ".ogg", ".m4a", ".aac", ".flac"))
 
 
-def _play_voice(path):
-    """播放语音：WAV 用系统 winsound，其它格式用系统默认播放器。"""
+_VOICE_SPEED = [1.0, 1.5, 2.0]   # 语音播放倍速档位
+
+
+def _play_voice(path, speed=1.0):
+    """播放语音：WAV 用 winsound（可变速用 sounddevice），其它格式用系统播放器。
+
+    speed=1.0 用 winsound（低开销）；speed>1 用 sounddevice+numpy 重采样变速。
+    """
     if not path or not os.path.isfile(path):
         return
     try:
         if str(path).lower().endswith(".wav"):
+            if speed and speed > 1.01:
+                import threading as _th
+                _th.Thread(target=_play_wav_speed, args=(path, speed), daemon=True).start()
+                return
             import winsound
             winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
         elif os.name == "nt":
@@ -567,6 +577,28 @@ def _play_voice(path):
         else:
             import subprocess
             subprocess.Popen(["xdg-open", path])
+    except Exception:
+        pass
+
+
+def _play_wav_speed(path, speed):
+    """用 sounddevice 以指定倍速播放 WAV（numpy 线性插值重采样）。"""
+    try:
+        import sounddevice as sd
+        import numpy as np
+        import wave
+        with wave.open(path, "rb") as wf:
+            rate = wf.getframerate()
+            n = wf.getnframes()
+            raw = wf.readframes(n)
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        # 线性插值变速
+        if speed and abs(speed - 1.0) > 0.01:
+            n_out = int(len(data) / speed)
+            idx = np.linspace(0, len(data) - 1, n_out)
+            data = np.interp(idx, np.arange(len(data)), data)
+        sd.play(data, rate)
+        sd.wait()
     except Exception:
         pass
 
@@ -2721,6 +2753,8 @@ class ChatApp:
         self._voice_btns = {}         # 语音路径 -> 播放按钮（播放时更新文本）
         self._voice_bars = {}         # 语音路径 -> 进度条
         self._voice_durs = {}         # 语音路径 -> 时长（秒）
+        self._voice_speeds = {}       # 语音路径 -> 倍速档位索引
+        self._voice_spd_btns = {}     # 语音路径 -> 倍速按钮
         self._voice_tick_job = None   # 进度刷新的 after 任务 id
         self._reaction_rows = {}       # mid -> 回应 badge 行控件
         self._feed_after = None        # 已读/送达/编辑/撤回回执的合并重渲染 timer id
@@ -3646,6 +3680,13 @@ class ChatApp:
         old = self._sessions.get(self._current)
         if old is not None and old.get("key") != key:
             old["last_seen_ts"] = time.time()
+            # 记录离开时的滚动位置，切回来恢复（不会总跳到底部）
+            try:
+                canvas = self.feed._parent_canvas
+                frac = canvas.yview()[0]
+                old["scroll_frac"] = frac
+            except Exception:
+                pass
             # 草稿保存：切换会话时保留当前输入内容
             try:
                 draft = self.input_box.get("1.0", "end").strip()
@@ -4336,6 +4377,27 @@ class ChatApp:
             threading.Thread(target=self._auto_backup_loop, daemon=True).start()
         except Exception:
             pass
+        # 启动时后台清理下载目录中超过 30 天的临时/分片文件
+        try:
+            threading.Thread(target=self._cleanup_downloads, daemon=True).start()
+        except Exception:
+            pass
+
+    def _cleanup_downloads(self):
+        """清理收件夹里超过 30 天的 .p2pchat-part 分片残留（失败中断下载的垃圾）。"""
+        try:
+            if not os.path.isdir(DOWNLOADS_DIR):
+                return
+            import glob
+            cutoff = time.time() - 30 * 86400
+            for p in glob.glob(os.path.join(DOWNLOADS_DIR, ".p2pchat-part-*")):
+                try:
+                    if os.path.getmtime(p) < cutoff:
+                        os.remove(p)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def _restore_data(self):
         """从 zip 备份恢复数据（覆盖当前数据）。"""
@@ -4952,6 +5014,20 @@ class ChatApp:
             if path and os.path.isfile(path):
                 self._do_send_file(path)
 
+    def _cycle_voice_speed(self, path):
+        """切换语音倍速：1x → 1.5x → 2x → 1x 循环。"""
+        try:
+            idx = (self._voice_speeds.get(path, 0) + 1) % len(_VOICE_SPEED)
+            self._voice_speeds[path] = idx
+            spd = _VOICE_SPEED[idx]
+            btn = self._voice_spd_btns.get(path)
+            if btn is not None:
+                txt = ("1x" if spd == 1.0 else ("1.5x" if spd == 1.5 else "2x"))
+                btn.configure(text=txt)
+            self._set_status(f"语音倍速：{txt}", "ok")
+        except Exception:
+            pass
+
     def _toggle_voice_play(self, path):
         """点击语音气泡：播放（显示进度条）；再点停止。"""
         if getattr(self, "_playing_voice", None) == path:
@@ -4971,7 +5047,8 @@ class ChatApp:
                 btn.configure(text="⏹ 停止")
             except Exception:
                 pass
-        _play_voice(path)
+        spd = _VOICE_SPEED[self._voice_speeds.get(path, 0)]
+        _play_voice(path, speed=spd)
         self._voice_start_ts = time.time()
         self._voice_tick()
 
@@ -6266,7 +6343,16 @@ class ChatApp:
             fg_color=C("input_bg"), text_color=C("text"),
             hover_color=C("input_hover"), font=(FONT, 12),
             command=lambda p=path: self._toggle_voice_play(p))
-        self._voice_btns[path].pack(anchor="w")
+        self._voice_btns[path].pack(anchor="w", side="left")
+        # 倍速切换按钮（1x / 1.5x / 2x 循环）
+        self._voice_speeds[path] = 0
+        spd_btn = ctk.CTkButton(
+            vbox, text="1x", width=38, height=34, corner_radius=10,
+            fg_color="transparent", text_color=C("text_mute"),
+            hover_color=C("input_hover"), font=(FONT, 10, "bold"),
+            command=lambda p=path: self._cycle_voice_speed(p))
+        spd_btn.pack(anchor="w", side="left", padx=(6, 0))
+        self._voice_spd_btns[path] = spd_btn
         # 语音右键菜单：转发 / 打开位置
         self._voice_btns[path].bind(
             "<Button-3>",
@@ -6956,7 +7042,18 @@ class ChatApp:
         if self._search_query:
             self._scroll_top()
         else:
-            self._scroll_bottom()
+            # 若该会话保存过滚动位置（切走前正在看历史），恢复之；否则回到底部
+            frac = (s or {}).get("scroll_frac")
+            if frac and not self._history_expanded:
+                try:
+                    canvas = self.feed._parent_canvas
+                    canvas.update_idletasks()
+                    canvas.configure(scrollregion=canvas.bbox("all"))
+                    canvas.yview_moveto(max(0.0, min(1.0, float(frac))))
+                except Exception:
+                    self._scroll_bottom()
+            else:
+                self._scroll_bottom()
         if s:
             self._ack_reads(s)
 
@@ -7114,6 +7211,11 @@ class ImagePreview:
             if img.mode not in ("RGB", "RGBA", "L"):
                 img = img.convert("RGB")
             img.thumbnail((820, 600))
+            self._orig_img = img.copy()   # 原始图（缩放/旋转基于它）
+            self._base_w = img.width
+            self._base_h = img.height
+            self._zoom_lvl = 1.0
+            self._rotated = 0
             ctk_img = CTkImage(light_image=img, dark_image=img, size=(img.width, img.height))
         except Exception:
             messagebox.showinfo("无法预览", "图片文件无法读取。")
@@ -7128,7 +7230,27 @@ class ImagePreview:
 
         ctk.CTkLabel(top, text=os.path.basename(path), text_color=C("text_2"),
                      font=(FONT, 11)).pack(padx=20, pady=(12, 4))
-        ctk.CTkLabel(top, image=ctk_img, text="").pack(padx=24, pady=(0, 4))
+        self._img_lbl = ctk.CTkLabel(top, image=ctk_img, text="")
+        self._img_lbl.pack(padx=24, pady=(0, 4))
+        # 操作栏：缩小 / 放大 / 旋转 / 保存副本
+        ctrl = ctk.CTkFrame(top, fg_color="transparent")
+        ctrl.pack(pady=(0, 6))
+        ctk.CTkButton(ctrl, text="−", width=40, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 13, "bold"),
+                      command=lambda: self._zoom(0.8)).pack(side="left", padx=3)
+        ctk.CTkButton(ctrl, text="+", width=40, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 13, "bold"),
+                      command=lambda: self._zoom(1.25)).pack(side="left", padx=3)
+        ctk.CTkButton(ctrl, text="↻", width=48, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 12),
+                      command=self._rotate).pack(side="left", padx=3)
+        ctk.CTkButton(ctrl, text="保存副本", width=80, height=28, corner_radius=8,
+                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                      text_color=C("text_2"), font=(FONT, 11),
+                      command=lambda: self._save_copy(path)).pack(side="left", padx=3)
         ctk.CTkButton(top, text="关闭", width=90, height=30, corner_radius=8,
                       fg_color=C("input_bg"), hover_color=C("input_hover"),
                       text_color=C("text_2"), font=(FONT, 12), command=top.destroy).pack(pady=(4, 14))
@@ -7157,6 +7279,57 @@ class ImagePreview:
         top.bind("<Escape>", lambda e: top.destroy())
         try:
             top.focus_set()
+        except Exception:
+            pass
+
+    def _zoom(self, factor):
+        """缩放预览图片（±按钮，范围 0.2 ~ 4.0）。"""
+        try:
+            nxt = getattr(self, "_zoom_lvl", 1.0) * factor
+            self._zoom_lvl = max(0.2, min(4.0, nxt))
+            img = self._orig_img
+            w = max(1, int(self._base_w * self._zoom_lvl))
+            h = max(1, int(self._base_h * self._zoom_lvl))
+            ctk_img = CTkImage(light_image=img, dark_image=img, size=(w, h))
+            self._ctk_img = ctk_img
+            self._img_lbl.configure(image=ctk_img)
+        except Exception:
+            pass
+
+    def _rotate(self):
+        """旋转预览图片 90°。"""
+        try:
+            if getattr(self, "_rotated", 0) >= 3:
+                self._rotated = 0
+            else:
+                self._rotated = getattr(self, "_rotated", 0) + 1
+            img = self._orig_img.rotate(-90 * self._rotated, expand=True)
+            ctk_img = CTkImage(light_image=img, dark_image=img,
+                               size=(img.width, img.height))
+            self._ctk_img = ctk_img
+            self._img_lbl.configure(image=ctk_img)
+        except Exception:
+            pass
+
+    def _save_copy(self, path):
+        """把当前预览图保存为副本。"""
+        try:
+            from tkinter import filedialog
+            base = os.path.basename(path) or "image.png"
+            name, ext = os.path.splitext(base)
+            dest = filedialog.asksaveasfilename(
+                title="保存图片副本", defaultextension=ext or ".png",
+                initialfile=(name + "_copy" + (ext or ".png")))
+            if not dest:
+                return
+            img = self._orig_img
+            if getattr(self, "_rotated", 0):
+                img = img.rotate(-90 * self._rotated, expand=True)
+            img.save(dest)
+            try:
+                messagebox.showinfo("已保存", f"图片已保存到：\n{dest}")
+            except Exception:
+                pass
         except Exception:
             pass
 

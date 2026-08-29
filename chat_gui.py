@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.8.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.8.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -8338,7 +8338,9 @@ class ChatApp:
                 if self._stick_bottom:
                     canvas.yview_moveto(1.0)
                 else:
-                    self._show_new_msg_floating()
+                    # 累计新到达未读数（用户上翻期间）
+                    self._float_unread = getattr(self, "_float_unread", 0) + 1
+                    self._show_new_msg_floating(self._float_unread)
             except Exception:
                 pass
         try:
@@ -8346,13 +8348,21 @@ class ChatApp:
         except Exception:
             pass
 
-    def _show_new_msg_floating(self):
-        """底部“↓ 新消息”浮标：用户在上翻时新消息到达后可点击返回最新。"""
+    def _show_new_msg_floating(self, count=1):
+        """底部“↓ 新消息”浮标：用户在上翻时新消息到达后可点击返回最新。
+        count 为未读条数（多条时显示数量）。"""
         try:
             if getattr(self, "_new_msg_floating", None) is not None:
+                # 已显示：更新条数文本
+                try:
+                    self._new_msg_floating.configure(
+                        text=(f"↓ {count} 条新消息" if count > 1 else "↓ 新消息"))
+                except Exception:
+                    pass
                 return
             host = self.feed.master
-            btn = ctk.CTkButton(host, text="↓ 新消息", height=28, corner_radius=14,
+            btn = ctk.CTkButton(host, text=(f"↓ {count} 条新消息" if count > 1 else "↓ 新消息"),
+                                height=28, corner_radius=14,
                                 fg_color=C("accent"), hover_color=C("accent_hover"),
                                 text_color="#ffffff", font=(FONT, 11, "bold"),
                                 command=self._goto_newest)
@@ -8367,6 +8377,7 @@ class ChatApp:
             self._hide_new_msg_floating()
         except Exception:
             pass
+        self._float_unread = 0
         self._scroll_bottom_now()
         self._stick_bottom = True
 
@@ -8388,7 +8399,9 @@ class ChatApp:
             s = self._sessions.get(key)
             if s is not None:
                 s["unread"] = s.get("unread", 0) + 1
+                self._unread_total += 1
                 self._apply_session_list()
+                self._update_window_title()
             return
         self._stick_bottom = self._at_bottom()
         tid = info.get("tid")

@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.6.8"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.9"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3055,6 +3055,7 @@ class ChatApp:
         self._thumb_cache = {}      # 图片缩略图缓存：path -> CTkImage
         self._my_avatar_ctk = None  # 自己的圆形头像缓存
         self._last_title = ""       # 窗口标题缓存（避免频繁重设）
+        self._unread_total = 0      # 未读总数缓存（增量维护，避免每次标题/角标全量 sum）
         self._read_acked = set()     # 已发送过已读回执的消息 mid
         self._stick_bottom = True   # 新消息到达前用户是否贴底（自动滚动判断）
         self._new_msg_floating = None  # “↓ 新消息”浮标（用户上翻时新消息到达提示）
@@ -3160,6 +3161,7 @@ class ChatApp:
         for cid, name in _scan_dm_sessions():
             self._ensure_dm_session(cid, name)
         self._current = self._group_key(self._rooms[0])
+        self._unread_total = sum(s.get("unread", 0) for s in self._sessions.values())
 
         self._apply_session_list()
         self.root.after(1, self._render_feed)  # 延迟渲染 feed，窗口先显示，启动更快
@@ -4633,6 +4635,9 @@ class ChatApp:
             except Exception:
                 pass
         s = self._sessions[key]
+        self._unread_total -= s.get("unread", 0)
+        if self._unread_total < 0:
+            self._unread_total = 0
         s["unread"] = 0
         s["@me"] = False
         self._update_chat_title()
@@ -5182,8 +5187,17 @@ class ChatApp:
                      font=(FONT, max(11, self._chat_font_size - 1), "bold" if selected else "normal"), cursor="hand2").pack(side="left")
         stime = self._session_time(s) if s else ""
         if stime:
-            ctk.CTkLabel(nrow, text=stime, anchor="e",
-                         text_color=C("text_mute"), font=(FONT, 9)).pack(side="right")
+            tl = ctk.CTkLabel(nrow, text=stime, anchor="e",
+                              text_color=C("text_mute"), font=(FONT, 9))
+            tl.pack(side="right")
+            # 悬停显示完整日期时间（QQ 式）
+            try:
+                _ft = _fmt_full_time((s.get("messages") or [{}])[-1].get("ts"))
+                if _ft:
+                    tl.bind("<Enter>", lambda e, t=_ft: self._set_status(t, "mute"))
+                    tl.bind("<Leave>", lambda e: self._restore_status())
+            except Exception:
+                pass
         if s and (s.get("draft") or "").strip():
             ctk.CTkLabel(row, text="📝", text_color=C("text_mute"),
                          font=(FONT, 10), cursor="hand2").pack(side="right", padx=(0, 6))
@@ -5225,8 +5239,17 @@ class ChatApp:
                      cursor="hand2").pack(side="left")
         stime = self._session_time(s)
         if stime:
-            ctk.CTkLabel(nrow, text=stime, anchor="e",
-                         text_color=C("text_mute"), font=(FONT, 9)).pack(side="right")
+            tl = ctk.CTkLabel(nrow, text=stime, anchor="e",
+                              text_color=C("text_mute"), font=(FONT, 9))
+            tl.pack(side="right")
+            # 悬停显示完整日期时间（QQ 式）
+            try:
+                _ft = _fmt_full_time((s.get("messages") or [{}])[-1].get("ts"))
+                if _ft:
+                    tl.bind("<Enter>", lambda e, t=_ft: self._set_status(t, "mute"))
+                    tl.bind("<Leave>", lambda e: self._restore_status())
+            except Exception:
+                pass
         if preview:
             ctk.CTkLabel(mid, text=preview, anchor="w", text_color=C("text_mute"),
                          font=(FONT, max(9, self._chat_font_size - 3)), cursor="hand2").pack(anchor="w")
@@ -5401,6 +5424,7 @@ class ChatApp:
                                      file_path=file_path, mid=mid)
         else:
             s["unread"] = s.get("unread", 0) + 1
+            self._unread_total += 1
             self._schedule_session_list()
             self._update_window_title()
             if not mine and not self._dnd and s.get("key") not in self._muted:
@@ -5818,18 +5842,30 @@ class ChatApp:
             self._set_status("开放失败，请重试", "err")
 
     def _measure_network(self):
-        """测量到 MQTT 服务器的连接延迟（TCP 建连耗时）。"""
+        """测量到 MQTT 服务器的连接延迟（TCP 建连耗时，主服务器 + 辅助服务器对比）。"""
         self._set_status("正在测速…", "mute")
-        host, port = self.broker, self.port
-        try:
+
+        def _probe(host, port, timeout=5.0):
             import socket as _s
             t0 = time.time()
-            s = _s.create_connection((host, int(port)), timeout=5)
+            s = _s.create_connection((host, int(port)), timeout=timeout)
             s.close()
-            ms = (time.time() - t0) * 1000
-            self._set_status(f"服务器 {host}:{port} · 连接耗时 {ms:.0f} ms", "accent")
-        except Exception:
-            self._set_status(f"无法连接服务器 {host}:{port}", "err")
+            return (time.time() - t0) * 1000
+
+        targets = [(self.broker, int(self.port))]
+        seen = {(self.broker, int(self.port))}
+        for h, p_ in AUX_BROKERS:
+            if (h, int(p_)) not in seen:
+                targets.append((h, int(p_)))
+                seen.add((h, int(p_)))
+        lines = []
+        for host, port in targets[:4]:
+            try:
+                ms = _probe(host, port)
+                lines.append(f"{host}:{port}  {ms:.0f}ms")
+            except Exception:
+                lines.append(f"{host}:{port}  超时")
+        self._set_status(" · ".join(lines), "accent" if "超时" not in "".join(lines) else "ok")
 
     def _export_current_history(self, html=False):
         """把当前会话的聊天记录导出为 txt（默认）或 html 网页文件。"""
@@ -5935,6 +5971,9 @@ class ChatApp:
             return
         s["messages"] = []
         self._mid_index.pop(self._current, None)
+        self._unread_total -= s.get("unread", 0)
+        if self._unread_total < 0:
+            self._unread_total = 0
         s["unread"] = 0
         if s["kind"] == "group":
             _delete_group_history(s["room"])
@@ -6219,6 +6258,7 @@ class ChatApp:
                     s["unread"] = 0
                     n += 1
                 s["@me"] = False
+            self._unread_total = 0
             self._last_list_fp = None
             self._apply_session_list()
             self._update_window_title()
@@ -6332,7 +6372,10 @@ class ChatApp:
         for s in self._sessions.values():
             s["messages"] = []
             self._mid_index.pop(s.get("key"), None)
+            self._unread_total -= s.get("unread", 0)
             s["unread"] = 0
+        if self._unread_total < 0:
+            self._unread_total = 0
             if s["kind"] == "group":
                 _delete_group_history(s["room"])
             else:
@@ -6647,8 +6690,10 @@ class ChatApp:
             for ln in text.split(chr(10)):
                 est += max(1, -(-len(ln) // 60))
             target = max(2, min(est, 5))
-            want = 72 if target <= 2 else (72 + (target - 2) * 22)
-            want = max(72, min(want, 160))
+            # 行高随字号缩放：字号大时每行更高，避免多行输入框被估矮
+            line_h = max(18, int(18 + (self._chat_font_size - 12) * 1.8))
+            want = 72 if target <= 2 else (72 + (target - 2) * line_h)
+            want = max(72, min(want, 180))
             if want != cur:
                 box.configure(height=want)
         except Exception:
@@ -7944,7 +7989,7 @@ class ChatApp:
                 base = f"P2P 聊天 · 已连接 · {len(self._peers)} 人在线"
             else:
                 base = "P2P 聊天 · 未连接"
-            unread = sum(s.get("unread", 0) for s in self._sessions.values())
+            unread = self._unread_total
             if unread:
                 base = f"● {base}  [{unread} 条未读]"
             if self.appearance == "anime":
@@ -7961,7 +8006,7 @@ class ChatApp:
         if os.name != "nt":
             return
         try:
-            n = sum(s.get("unread", 0) for s in self._sessions.values())
+            n = self._unread_total
             if n == self._last_badge_n:
                 return
             self._last_badge_n = n
@@ -8330,9 +8375,11 @@ class ChatApp:
                 self._reaction_rows[mid] = row
         if mid:
             # 悬停快捷操作浮层（Discord/QQ 式）：👍 回应 / ↩ 引用 / ⧉ 转发 / 📋 复制
+            # 文件消息额外传 path → 浮层提供 📂 打开位置 / 📋 复制路径
+            _hp = file_path if (file_path and os.path.isfile(file_path)) else None
             for _w in (bubble, body):
-                _w.bind("<Enter>", lambda e, m=mid, b=bubble, n=name, t=text:
-                        self._hover_enter(m, b, n, t), add="+")
+                _w.bind("<Enter>", lambda e, m=mid, b=bubble, n=name, t=text, pp=_hp:
+                        self._hover_enter(m, b, n, t, pp), add="+")
                 _w.bind("<Leave>", lambda e, m=mid: self._hover_leave(m), add="+")
         self._maybe_scroll_bottom()
         self._trim_feed()
@@ -8514,8 +8561,12 @@ class ChatApp:
             if (text or "").strip():
                 btns.insert(3, ("🔊", lambda: self._hover_speak(text)))
             if path and os.path.isfile(path):
-                btns.insert(0, ("🔍", lambda: self._hover_view_image(path)))
-                btns.insert(1, ("💾", lambda: self._hover_save_image(path)))
+                if _is_image_path(path):
+                    btns.insert(0, ("🔍", lambda: self._hover_view_image(path)))
+                    btns.insert(1, ("💾", lambda: self._hover_save_image(path)))
+                else:
+                    btns.insert(0, ("📂", lambda: self._hover_open_folder(path)))
+                    btns.insert(1, ("📋", lambda: self._hover_copy_path(path)))
             for t, cmd in btns:
                 b = ctk.CTkButton(bar, text=t, width=28, height=24, corner_radius=6,
                                   fg_color="transparent", hover_color=C("hover"),
@@ -8638,6 +8689,14 @@ class ChatApp:
     def _hover_save_image(self, path):
         self._destroy_hover_bar()
         self._save_image_dialog(path)
+
+    def _hover_open_folder(self, path):
+        self._destroy_hover_bar()
+        self._open_file_location(path)
+
+    def _hover_copy_path(self, path):
+        self._destroy_hover_bar()
+        self._copy_to_clipboard(path)
 
     def _mentions_me(self, text):
         """判断消息正文是否 @ 了我（用于高亮）。"""

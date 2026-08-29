@@ -97,7 +97,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.7.6"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.7.7"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -5975,9 +5975,27 @@ class ChatApp:
                 rows.append(f'<div class="sys">[{ts}] {name}：（已撤回）</div>')
                 continue
             body = _esc(m.get("text", "")).replace("\n", "<br>")
-            tag = f'<img src="file:///{m["img_path"]}" alt="图片">' if m.get("img_path") else body
-            if m.get("voice"):
+            tag = body
+            if m.get("img_path"):
+                tag = f'<img src="file:///{m["img_path"]}" alt="图片">'
+            elif m.get("voice"):
                 tag = "🎤 [语音消息]"
+            elif m.get("file_path"):
+                _fn = _esc(os.path.basename(str(m["file_path"])))
+                _sz = ""
+                try:
+                    _sz = f"（{os.path.getsize(m['file_path']) // 1024} KB）"
+                except Exception:
+                    pass
+                tag = f'📎 <a href="file:///{_esc(m["file_path"])}">{_fn}</a> {_sz}'
+            # 回复引用（QQ 式：引用块显示原消息）
+            if m.get("reply"):
+                _r = m["reply"]
+                tag = (f'<div class="quote">↩ {_esc(str(_r.get("name",""))) }：'
+                       f'{_esc(str(_r.get("text","")))[:60]}</div>' + tag)
+            # 已编辑标记
+            if m.get("edited"):
+                tag += ' <span class="edited">已编辑</span>'
             rows.append(
                 f'<div class="row {cls}"><div class="meta">{name} · {ts}</div>'
                 f'<div class="bubble">{tag}</div></div>')
@@ -5992,6 +6010,9 @@ class ChatApp:
         .other .bubble{background:#2b2d31;color:#dbdee1}
         .sys{text-align:center;color:#949ba4;font-size:12px;margin:10px 0}
         img{max-width:260px;border-radius:8px}
+        .quote{font-size:12px;color:#949ba4;border-left:3px solid #5865f2;padding:2px 8px;margin-bottom:4px;background:#313338;border-radius:6px}
+        .edited{font-size:10px;color:#949ba4;margin-left:6px}
+        a{color:#7289da}
         """
         doc = (f"<!DOCTYPE html><html lang='zh'><head><meta charset='utf-8'>"
                f"<title>{_esc(s.get('name','会话'))} 聊天记录</title>"

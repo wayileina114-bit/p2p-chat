@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.0"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.1"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3066,7 +3066,7 @@ class ChatApp:
         self._rooms = _load_rooms() or _scan_group_rooms()
         self._contacts = _load_contacts()
         if not self._rooms:
-            default = self.room_var.get().strip() or "默认房间"
+            default = "默认房间"
             self._rooms = [default]
             _save_rooms(self._rooms)
         for room in self._rooms:
@@ -3250,85 +3250,50 @@ class ChatApp:
         # Web 端风格：自绘标题栏（无边框窗口）最顶
         if getattr(self, "_custom_titlebar", False):
             self._build_titlebar(self.root)
-        # 顶部工具条：头像 / 昵称 / ID / 房间 / 加入 / 连接 / 主题
+        # 顶部工具条（Web 式精简）：左侧连接状态，右侧主题/免打扰/隐身/更新
+        # （昵称/ID/头像收进左上角个人资料卡；加入房间收进导航栏 ➕；私聊收进会话列表）
         top = ctk.CTkFrame(self.root, corner_radius=0, fg_color=C("panel"))
         top.pack(fill="x")
 
-        # 右侧按钮（检查更新 / 主题）先占位：pack 顺序靠前，窗口较窄时也
-        # 优先保留它们的空间，避免被左侧较宽的控件（昵称/房间/加入/连接）挤掉点不到。
-        self.update_btn = ctk.CTkButton(top, text="🔄", width=40, height=32, corner_radius=8,
+        self.status_var = ctk.StringVar(value="未连接")
+        self.conn_lbl = ctk.CTkLabel(top, textvariable=self.status_var,
+                                     anchor="w", font=(FONT, 11),
+                                     text_color=C("text_mute"))
+        self.conn_lbl.pack(side="left", padx=(14, 0), pady=10)
+
+        self.update_btn = ctk.CTkButton(top, text="🔄", width=38, height=30, corner_radius=8,
                                           fg_color=C("input_bg"), hover_color=C("input_hover"),
-                                          text_color=C("text_2"), font=(FONT, 14),
+                                          text_color=C("text_2"), font=(FONT, 13),
                                           command=self._manual_check_update)
-        self.update_btn.pack(side="right", padx=(0, 8), pady=12)
+        self.update_btn.pack(side="right", padx=(0, 10), pady=10)
         _tbtn = {"dark": "🌙", "light": "☀️", "anime": "🌸"}.get(self.appearance, "🌙")
         self.theme_btn = ctk.CTkButton(top, text=_tbtn,
-                                        width=40, height=32, corner_radius=8,
+                                        width=38, height=30, corner_radius=8,
                                         fg_color=C("input_bg"), hover_color=C("input_hover"),
-                                        text_color=C("text_2"), font=(FONT, 14),
+                                        text_color=C("text_2"), font=(FONT, 13),
                                         command=self._toggle_theme)
-        self.theme_btn.pack(side="right", padx=(0, 12), pady=12)
+        self.theme_btn.pack(side="right", padx=(0, 6), pady=10)
         self.dnd_btn = ctk.CTkButton(top, text=("🔕" if self._dnd else "🔔"),
-                                       width=40, height=32, corner_radius=8,
+                                       width=38, height=30, corner_radius=8,
                                        fg_color=C("input_bg"), hover_color=C("input_hover"),
-                                       text_color=C("text_2"), font=(FONT, 14),
+                                       text_color=C("text_2"), font=(FONT, 13),
                                        command=self._toggle_dnd)
-        self.dnd_btn.pack(side="right", padx=(0, 8), pady=12)
-        self.ghost_btn = ctk.CTkButton(top, text="🙂", width=40, height=32, corner_radius=8,
+        self.dnd_btn.pack(side="right", padx=(0, 6), pady=10)
+        self.ghost_btn = ctk.CTkButton(top, text="🙂", width=38, height=30, corner_radius=8,
                                        fg_color=C("input_bg"), hover_color=C("input_hover"),
-                                       text_color=C("text_2"), font=(FONT, 14),
+                                       text_color=C("text_2"), font=(FONT, 13),
                                        command=self._toggle_ghost)
-        self.ghost_btn.pack(side="right", padx=(0, 8), pady=12)
+        self.ghost_btn.pack(side="right", padx=(0, 6), pady=10)
 
-        self.top_avatar = ctk.CTkLabel(top, text="", width=34, height=34,
-                                       corner_radius=17, fg_color=C("input_bg"), cursor="hand2")
-        self.top_avatar.pack(side="left", padx=(14, 6), pady=12)
-        self._render_top_avatar()
-        self.top_avatar.bind("<Button-1>", lambda e: self._open_profile_card())
-
-        ctk.CTkLabel(top, text="昵称", text_color=C("text_mute"), font=(FONT, 11)).pack(side="left", padx=(0, 5), pady=12)
+        # 昵称变量保留（个人资料卡编辑后经此同步）
         self.nick_var = ctk.StringVar(value=self._profile_name)
         self.nick_var.trace_add("write", lambda *_: self._on_nick_changed())
-        ctk.CTkEntry(top, textvariable=self.nick_var, width=108, height=32,
-                     corner_radius=8, border_width=0, fg_color=C("input_bg"),
-                     text_color=C("text"), font=(FONT, 12)).pack(side="left", padx=(0, 8), pady=12)
-
-        self.id_btn = ctk.CTkButton(top, text="📋 复制ID", width=86, height=32,
-                                    corner_radius=8, fg_color=C("input_bg"),
-                                    text_color=C("text_2"), hover_color=C("input_hover"),
-                                    font=(FONT, 11), command=self._copy_my_id)
-        self.id_btn.pack(side="left", padx=(0, 10), pady=12)
-
-        ctk.CTkLabel(top, text="房间", text_color=C("text_mute"), font=(FONT, 11)).pack(side="left", padx=(0, 5), pady=12)
-        self.room_var = ctk.StringVar(value="")
-        self.room_combo = ctk.CTkComboBox(top, variable=self.room_var, width=150, height=32,
-                                          corner_radius=8, border_width=0, fg_color=C("input_bg"),
-                                          button_color=C("input_hover"), button_hover_color=C("input_hover"),
-                                          text_color=C("text"), dropdown_fg_color=C("panel"),
-                                          dropdown_text_color=C("text"), dropdown_hover_color=C("hover"),
-                                          font=(FONT, 12), dropdown_font=(FONT, 12),
-                                          values=[])
-        self.room_combo.pack(side="left", padx=(0, 8), pady=12)
-        self.room_combo.bind("<FocusIn>", lambda e: self._refresh_room_combo())
-
-        self.add_room_btn = ctk.CTkButton(top, text="＋ 加入", width=74, height=32,
-                                          corner_radius=8, font=(FONT, 12, "bold"),
-                                          fg_color=C("accent"), hover_color=C("accent_hover"),
-                                          command=self._add_room_from_input)
-        self.add_room_btn.pack(side="left", pady=12, padx=(0, 8))
-
-        self.dm_btn = ctk.CTkButton(top, text="💌 私聊", width=84, height=32,
-                                     corner_radius=8, font=(FONT, 12, "bold"),
-                                     fg_color=C("accent"), hover_color=C("accent_hover"),
-                                     command=self._open_dm_dialog)
-        self.dm_btn.pack(side="left", pady=12, padx=(0, 8))
 
         # 顶栏底部的品牌色条（二次元主题下是樱粉色装饰线）
         ctk.CTkFrame(self.root, corner_radius=0, height=3,
                      fg_color=C("accent")).pack(fill="x")
 
-        # 状态栏
-        self.status_var = ctk.StringVar(value="未连接")
+        # 状态栏（status_var 已在顶栏创建，两处共享同一文本）
         self.status_label = ctk.CTkLabel(self.root, textvariable=self.status_var,
                                          anchor="w", font=(FONT, 11),
                                          text_color=C("text_mute"), fg_color=C("app_bg"))
@@ -3348,11 +3313,17 @@ class ChatApp:
         left.pack_propagate(False)
         self.search_var = ctk.StringVar()
         self.search_var.trace_add("write", lambda *_: self._schedule_session_refresh())
-        ctk.CTkEntry(left, textvariable=self.search_var, height=32,
-                     corner_radius=8, border_width=0, fg_color=C("input_bg"),
+        srow = ctk.CTkFrame(left, fg_color="transparent")
+        srow.pack(fill="x", padx=10, pady=(12, 6))
+        ctk.CTkButton(srow, text="💌", width=34, height=32, corner_radius=R(8),
+                      fg_color=C("input_bg"), hover_color=C("accent_hover"),
+                      text_color=C("text"), font=(FONT, 13),
+                      command=self._open_dm_dialog).pack(side="left", padx=(0, 6))
+        ctk.CTkEntry(srow, textvariable=self.search_var, height=32,
+                     corner_radius=R(8), border_width=0, fg_color=C("input_bg"),
                      text_color=C("text"), placeholder_text_color=C("text_mute"),
                      placeholder_text="搜索会话 / 成员",
-                     font=(FONT, 12)).pack(fill="x", padx=10, pady=(12, 6))
+                     font=(FONT, 12)).pack(side="left", fill="x", expand=True)
         self.session_frame = ctk.CTkScrollableFrame(left, fg_color="transparent")
         self.session_frame.pack(fill="both", expand=True, padx=6, pady=(0, 8))
 
@@ -3448,14 +3419,36 @@ class ChatApp:
         self.reply_bar = ctk.CTkFrame(right, corner_radius=8, fg_color=C("warn_bg"))
 
         # 底部输入区
-        self._ibar = ctk.CTkFrame(right, corner_radius=R(12), fg_color=C("panel"))
+        # 输入区（Web 式重排）：左侧圆形工具钮 + 输入框 + 右侧圆形发送钮
+        self._ibar = ctk.CTkFrame(right, corner_radius=R(14), fg_color=C("panel"))
         self._ibar.pack(fill="x", padx=8, pady=(4, 10))
         ibar = self._ibar
 
+        # 左侧工具列：表情 / 文件 / 语音（圆形图标钮）
+        tools = ctk.CTkFrame(ibar, fg_color="transparent")
+        tools.pack(side="left", padx=(10, 4), pady=10)
+        self.emoji_btn = ctk.CTkButton(tools, text="😊", width=38, height=38, corner_radius=19,
+                                       fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                       text_color=C("text"), font=(FONT, 15),
+                                       command=self._toggle_emoji_panel)
+        self.emoji_btn.pack(pady=1)
+        self.file_btn = ctk.CTkButton(tools, text="📎", width=38, height=38, corner_radius=19,
+                                      fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                      text_color=C("text"), font=(FONT, 14),
+                                      command=self._pick_file)
+        self.file_btn.pack(pady=1)
+        self.voice_btn = ctk.CTkButton(tools, text="🎤", width=38, height=38, corner_radius=19,
+                                       fg_color=C("input_bg"), hover_color=C("input_hover"),
+                                       text_color=C("text"), font=(FONT, 14))
+        self.voice_btn.pack(pady=1)
+        self.voice_btn.bind("<ButtonPress-1>", lambda e: self._start_voice())
+        self.voice_btn.bind("<ButtonRelease-1>", lambda e: self._stop_voice())
+
+        # 输入框
         self.input_box = ctk.CTkTextbox(ibar, height=72, corner_radius=R(10), border_width=0,
                                         fg_color=C("input_bg"), text_color=C("text_mute"),
                                         font=(FONT, 12), wrap="word")
-        self.input_box.pack(side="left", fill="x", expand=True, padx=(14, 10), pady=14)
+        self.input_box.pack(side="left", fill="both", expand=True, padx=(6, 10), pady=10)
         self.input_box.insert("1.0", HINT)
         self.input_box.bind("<Return>", self._on_enter)
         self.input_box.bind("<Control-v>", self._on_paste)
@@ -3469,6 +3462,13 @@ class ChatApp:
                 self.input_box.dnd_bind("<<Drop>>", self._on_drop)
             except Exception:
                 pass
+
+        # 发送钮（圆形 accent）
+        self.send_btn = ctk.CTkButton(ibar, text="➤", width=46, height=46, corner_radius=23,
+                                      font=(FONT, 17, "bold"), fg_color=C("accent"),
+                                      hover_color=C("accent_hover"), text_color="#ffffff",
+                                      command=self._send_text)
+        self.send_btn.pack(side="right", padx=(0, 12), pady=10)
 
         # Ctrl+F 打开会话内消息搜索
         self.root.bind("<Control-f>", self._open_search)
@@ -3485,26 +3485,6 @@ class ChatApp:
         # 焦点跟踪：后台/最小化时收到新消息弹 Windows 通知
         self.root.bind("<FocusIn>", lambda e: setattr(self, "_window_focused", True))
         self.root.bind("<FocusOut>", lambda e: setattr(self, "_window_focused", False))
-
-        btncol = ctk.CTkFrame(ibar, fg_color="transparent")
-        btncol.pack(side="right", padx=(0, 14), pady=14)
-        ctk.CTkButton(btncol, text="发送", width=88, height=34, corner_radius=8,
-                      font=(FONT, 12, "bold"), fg_color=C("accent"),
-                      hover_color=C("accent_hover"), command=self._send_text).pack(fill="x", pady=2)
-        ctk.CTkButton(btncol, text="📎 文件/图片", width=88, height=30, corner_radius=8,
-                      fg_color=C("input_bg"), text_color=C("text_2"), hover_color=C("input_hover"),
-                      font=(FONT, 12), command=self._pick_file).pack(fill="x", pady=3)
-        self.emoji_btn = ctk.CTkButton(btncol, text="😊 表情", width=88, height=30, corner_radius=8,
-                                        fg_color=C("input_bg"), text_color=C("text_2"),
-                                        hover_color=C("input_hover"), font=(FONT, 12),
-                                        command=self._toggle_emoji_panel)
-        self.emoji_btn.pack(fill="x", pady=3)
-        self.voice_btn = ctk.CTkButton(btncol, text="🎤 按住说话", width=88, height=30, corner_radius=8,
-                                       fg_color=C("input_bg"), text_color=C("text_2"),
-                                       hover_color=C("input_hover"), font=(FONT, 11))
-        self.voice_btn.pack(fill="x", pady=3)
-        self.voice_btn.bind("<ButtonPress-1>", lambda e: self._start_voice())
-        self.voice_btn.bind("<ButtonRelease-1>", lambda e: self._stop_voice())
 
     # --------------------------- 菜单 / 环境检测 ---------------------------
 
@@ -3919,15 +3899,20 @@ class ChatApp:
         ImagePreview(self.root, path)
 
     def _render_top_avatar(self):
-        img = _load_ctk_image(self._avatar, 34, 34) if self._avatar else None
-        if img is not None:
-            self.top_avatar.configure(image=img, text="", fg_color="transparent")
-            self._avatar_ref = img
-        else:
-            name = self._profile_name or "?"
-            self.top_avatar.configure(image=None, text=name[:1].upper(),
-                                      fg_color=_name_color(name),
-                                      text_color="#ffffff", font=(FONT, 15, "bold"))
+        """渲染头像到导航栏（Web 端风格：头像在左上角导航栏）。"""
+        try:
+            nav = getattr(self, "nav_avatar", None)
+            if nav is None:
+                return
+            img = _load_ctk_image(self._avatar, 36, 36) if self._avatar else None
+            if img is not None:
+                self._images.append(img)
+                nav.configure(image=img, text="")
+            else:
+                name = self._profile_name or "?"
+                nav.configure(image=None, text=name[:1].upper())
+        except Exception:
+            pass
 
     def _open_profile_card(self):
         """个人资料卡：头像 / 昵称 / ID / 个性签名。"""
@@ -4876,19 +4861,41 @@ class ChatApp:
     # --------------------------- 房间 / 连接 ---------------------------
 
     def _add_room_from_input(self):
-        room = self.room_var.get().strip() or "默认房间"
-        self._add_room(room)
+        """弹出加入房间对话框（Web 式：独立小窗输入房间名）。"""
+        try:
+            win = ctk.CTkToplevel(self.root)
+            win.title("加入房间")
+            win.geometry("360x200")
+            win.resizable(False, False)
+            win.attributes("-topmost", True)
+            ctk.CTkLabel(win, text="➕ 加入房间", font=(FONT, 14, "bold"),
+                         text_color=C("text")).pack(pady=(16, 4))
+            ctk.CTkLabel(win, text="输入房间名，双方加入同一房间即可互聊",
+                         font=(FONT, 10), text_color=C("text_mute")).pack()
+            var = ctk.StringVar(value="")
+            ent = ctk.CTkEntry(win, textvariable=var, width=240, height=32,
+                               corner_radius=8, border_width=0, fg_color=C("input_bg"),
+                               text_color=C("text"), placeholder_text="房间名",
+                               font=(FONT, 12))
+            ent.pack(pady=(12, 6))
+            ent.focus_set()
+
+            def _go():
+                room = var.get().strip() or "默认房间"
+                win.destroy()
+                self._add_room(room)
+
+            ctk.CTkButton(win, text="加入", width=140, height=32, corner_radius=8,
+                          font=(FONT, 12, "bold"), fg_color=C("accent"),
+                          hover_color=C("accent_hover"), command=_go).pack(pady=4)
+            win.bind("<Return>", lambda e: _go())
+            win.bind("<Escape>", lambda e: win.destroy())
+        except Exception:
+            self._add_room("默认房间")
 
     def _refresh_room_combo(self):
-        # 下拉历史：已加入的房间 + 历史文件里的房间
-        items = list(self._rooms)
-        for r in (_load_rooms() or []):
-            if r and r not in items:
-                items.append(r)
-        try:
-            self.room_combo.configure(values=(items or [""]))
-        except Exception:
-            pass
+        # 顶栏房间下拉已移除（导航栏 ➕ 对话框取代）；保留方法兼容旧调用
+        pass
 
     def _add_room(self, room):
         room = (room or "").strip()
@@ -4896,7 +4903,6 @@ class ChatApp:
             return
         if room in self._rooms:
             self._switch_to(self._group_key(room))
-            self.room_var.set("")
             self._ensure_connected()
             return
         self._rooms.append(room)
@@ -4906,8 +4912,6 @@ class ChatApp:
             self.backend.add_room(room)
         self._apply_session_list()
         self._switch_to(self._group_key(room))
-        self._refresh_room_combo()
-        self.room_var.set("")
         # 房间即群组：加入即自动连接常驻上线（后台加速通道同样由后端自动拉起）
         self._ensure_connected()
 
@@ -6028,7 +6032,7 @@ class ChatApp:
             target=lambda: _record_voice_to(self._voice_tmp, self._voice_stop_evt), daemon=True)
         self._voice_thread.start()
         try:
-            self.voice_btn.configure(text="⏹ 松开发送", fg_color=C("danger"))
+            self.voice_btn.configure(text="⏹", fg_color=C("danger"))
         except Exception:
             pass
         self._set_status("录音中… 松开按钮发送", "accent")
@@ -6043,7 +6047,7 @@ class ChatApp:
         except Exception:
             pass
         try:
-            self.voice_btn.configure(text="🎤 按住说话", fg_color=C("input_bg"))
+            self.voice_btn.configure(text="🎤", fg_color=C("input_bg"))
         except Exception:
             pass
         try:

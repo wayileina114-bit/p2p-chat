@@ -92,7 +92,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.5"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.5.6"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -3270,14 +3270,20 @@ class ChatApp:
             for room in getattr(self, "_rooms", []) or []:
                 ch = (str(room)[:1].upper() or "#")
                 sel = (room == cur_room)
+                irow = ctk.CTkFrame(rail, fg_color="transparent", height=44)
+                irow.pack(fill="x", pady=1)
+                # Discord 式选中指示条（左侧竖条）
+                ctk.CTkFrame(irow, width=3, height=28, corner_radius=2,
+                             fg_color=(C("text") if sel else "transparent")).pack(
+                    side="left", padx=(2, 1), fill="y")
                 b = ctk.CTkButton(
-                    rail, text=ch, width=40, height=40, corner_radius=20,
+                    irow, text=ch, width=40, height=40, corner_radius=20,
                     fg_color=(C("accent") if sel else C("input_bg")),
                     hover_color=C("accent_hover"),
                     text_color=("#ffffff" if sel else C("text")),
                     font=(FONT, 13, "bold"),
                     command=lambda r=room: self._switch_to(self._group_key(r)))
-                b.pack(pady=2)
+                b.pack(side="left", padx=(2, 0))
         except Exception:
             pass
 
@@ -4695,6 +4701,9 @@ class ChatApp:
         row = ctk.CTkFrame(self.session_frame, corner_radius=R(8),
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
+        # 选中指示条（Discord 式左侧竖条）
+        ctk.CTkFrame(row, width=3, height=30, corner_radius=2,
+                     fg_color=(C("accent") if selected else "transparent")).pack(side="left", padx=(2, 0), fill="y", pady=4)
         av = self._session_avatar(row, room, is_group=True)
         muted = self._is_muted(key)
         mid = ctk.CTkFrame(row, fg_color="transparent")
@@ -4733,6 +4742,8 @@ class ChatApp:
         row = ctk.CTkFrame(self.session_frame, corner_radius=R(8),
                            fg_color=(C("selected_bg") if selected else "transparent"))
         row.pack(fill="x", pady=1)
+        ctk.CTkFrame(row, width=3, height=30, corner_radius=2,
+                     fg_color=(C("accent") if selected else "transparent")).pack(side="left", padx=(2, 0), fill="y", pady=4)
         av = self._session_avatar(row, s["name"])
         mid = ctk.CTkFrame(row, fg_color="transparent")
         mid.pack(side="left", fill="x", expand=True, padx=(2, 4), pady=4)

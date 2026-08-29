@@ -95,7 +95,7 @@ def _derive_fernet(passphrase):
 # 常量
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "3.5.9"            # 程序版本（每次更新时 +1）
+APP_VERSION = "3.6.0"            # 程序版本（每次更新时 +1）
 UPDATE_OWNER = "wayileina114-bit"  # GitHub 仓库所有者（自动检查更新用）
 UPDATE_REPO = "p2p-chat"           # GitHub 仓库名（自动检查更新用）
 
@@ -1690,8 +1690,9 @@ class MqttBackend:
         误判为下线；这里周期性刷新自己的 ts，保证「活跃即在线」，只有真正停止
         心跳的离线者才会被 TTL 清掉。
         """
+        _retry_wait = 30
         while self.running:
-            time.sleep(30)
+            time.sleep(_retry_wait)
             if not self.running:
                 break
             try:
@@ -1704,7 +1705,13 @@ class MqttBackend:
             except Exception:
                 pass
             try:
+                had = bool(self._outbox)
                 self._flush_outbox()
+                # 指数退避：有补发任务时加速重试（30s），全空则放慢（60→120s 封顶），减少空转
+                if had:
+                    _retry_wait = 30
+                else:
+                    _retry_wait = min(120, _retry_wait * 2 if _retry_wait >= 60 else 60)
             except Exception:
                 pass
 
@@ -3189,6 +3196,16 @@ class ChatApp:
             nx = event.x_root - self._tb_drag[0]
             ny = event.y_root - self._tb_drag[1]
             self.root.geometry(f"+{int(nx)}+{int(ny)}")
+            # 窗口移动时关闭浮层（表情/提及面板留在原屏幕位置会很怪）
+            try:
+                if not getattr(self, "_emoji_locked", False):
+                    self._close_emoji_panel()
+            except Exception:
+                pass
+            try:
+                self._close_mention_panel()
+            except Exception:
+                pass
         except Exception:
             pass
         return "break"
@@ -4662,7 +4679,7 @@ class ChatApp:
             for w in (row, lbl):
                 w.bind("<Button-1>", lambda e, k=group_key: self._toggle_group_collapse(k))
 
-    def _session_avatar(self, parent, name, is_group=False, size=26):
+    def _session_avatar(self, parent, name, is_group=False, size=30):
         """会话列表圆形首字母头像（Discord/QQ 风格）：群聊显示 #，私聊显示昵称首字母。
         二次元主题下带樱粉描边。"""
         ch = ("#" if is_group else (str(name or "?")[:1].upper() or "?"))
@@ -4982,7 +4999,7 @@ class ChatApp:
             s["unread"] = s.get("unread", 0) + 1
             self._schedule_session_list()
             self._update_window_title()
-            if not mine:
+            if not mine and not self._dnd and s.get("key") not in self._muted:
                 self._flash_window()
 
     def _schedule_session_save(self, s):
@@ -4995,7 +5012,7 @@ class ChatApp:
                     self.root.after_cancel(self._session_save_after)
                 except Exception:
                     pass
-            self._session_save_after = self.root.after(100, lambda k=key: self._flush_session_save(k))
+            self._session_save_after = self.root.after(150, lambda k=key: self._flush_session_save(k))
         except Exception:
             self._save_session(s)
 
@@ -8315,6 +8332,27 @@ class ChatApp:
         quote = f"引用 {name or '对方'} 的消息：\n{t}\n"
         self._copy_to_clipboard(quote)
         self._set_status("已复制为引用格式", "ok")
+
+    def _speak_text(self, text):
+        """朗读消息（Windows 系统语音 SAPI，无需第三方库）。"""
+        try:
+            t = (text or "").strip()[:200]
+            if not t:
+                return
+            if os.name != "nt":
+                self._set_status("当前系统不支持语音朗读", "err")
+                return
+            import subprocess as _sp
+            safe = t.replace('"', "\u201c").replace("'", "\u2019")
+            ps = ("Add-Type -AssemblyName System.Speech; "
+                  "(New-Object System.Speech.Synthesis.SpeechSynthesizer)."
+                  "Speak('" + safe + "')")
+            _sp.Popen(["powershell", "-NoProfile", "-Command", ps],
+                      creationflags=0x08000000,  # CREATE_NO_WINDOW
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            self._set_status("正在朗读…", "mute")
+        except Exception:
+            self._set_status("朗读失败", "err")
 
     def _copy_msg_link(self, mid):
         """复制消息定位码：会话#mid，粘贴到任意会话可让别人直接定位到该消息。"""

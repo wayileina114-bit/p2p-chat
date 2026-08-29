@@ -23,6 +23,7 @@ build_stderr.txt
 build_stdout.txt
 iscc_err.txt
 iscc_out.txt
+_exe_icon.png
 
 # 系统 / 编辑器
 Thumbs.db
